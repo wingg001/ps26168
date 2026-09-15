@@ -1,0 +1,13 @@
+# Phase 0 core (required to run eval/run_phase0.py)
+numpy>=1.26
+pandas>=2.2
+PyYAML>=6.0
+matplotlib>=3.8
+
+# Install later (Phase 1+). Not required for the Phase 0 smoke run.
+# scipy>=1.12
+# pyproj>=3.6
+# torch>=2.2
+# onnxruntime>=1.18
+# geopandas>=1.0
+# osmnx>=1.9

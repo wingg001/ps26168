@@ -1,0 +1,47 @@
+# Phase 0+ experiment parameters. Duration, GNSS-denied interval, and
+# evaluation distance stay configurable so the prototype can run for a few
+# minutes now and later scale toward the SIH 1 km GNSS-denied case.
+
+project:
+  name: ps26168-car-baseline
+  problem_statement: "SIH 2026 PS26168 Intelligent Dead Reckoning"
+  scope: car_iovnbd_baseline
+  two_wheeler_extension: deferred
+
+paths:
+  data_root: data
+  raw_dir: data/raw/IO-VNBD
+  fixture_dir: data/fixtures
+  processed_dir: data/processed
+  maps_dir: data/maps
+  output_dir: outputs
+  log_dir: outputs/logs
+
+dataset:
+  name: IO-VNBD
+  source_url: https://github.com/onyekpeu/IO-VNBD
+  preferred_split: synchronised
+  # Drive id is a stem such as S1, Vta1a. Empty = use the Phase 0 fixture.
+  drive_id: fixture_s1
+  source: fixture  # fixture | raw
+  expected_imu_hz: 10.0
+  expected_vehicle_gps_hz: 10.0
+  expected_phone_gps_hz: 1.0
+
+run:
+  # Prototype target: a few minutes of successful end-to-end execution.
+  duration_s: 180.0
+  # Simulated / scored GNSS-denied window (seconds from clip start).
+  gnss_denied_start_s: 60.0
+  gnss_denied_duration_s: 90.0
+  # SIH later target is ~1000 m. Keep this a config value, never hard-code.
+  evaluation_distance_m: 250.0
+  sample_rate_hz: 10.0
+
+logging:
+  level: INFO
+  filename: phase0.log
+
+visualization:
+  save_plots: true
+  show_plots: false

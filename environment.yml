@@ -1,0 +1,7 @@
+name: ps26168-car-baseline
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
