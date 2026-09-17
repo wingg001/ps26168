@@ -1,0 +1,3 @@
+session,n,dur_s,mean_dt_ms,yaw_min_deg,yaw_max_deg,yaw_circ_mean_deg,yaw_circ_std_deg,pitch_mean_deg,pitch_std_deg,roll_mean_deg,roll_std_deg,tilt_z_mean_deg,mag_magnitude_mean_uT,gps_spd_mean,gps_spd_max
+s1,51746,5174.5,100.0,0.0,360.0,345.0,55.2,-81.1,2.72,-127.5,82.45,0.122,40.1,7.43,18.82
+vw12,918,91.7,100.0,188.7,267.3,225.8,17.48,-87.0,0.74,-152.7,9.4,0.276,38.2,25.13,26.48

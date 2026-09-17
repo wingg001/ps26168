@@ -1,0 +1,3 @@
+session,win_start_s,win_end_s,dur_s,stationary,yaw_circ_mean_deg,yaw_circ_std_deg,yaw_drift_deg_per_s,yaw_drift_deg_total,mag_tc_circ_mean_deg,mag_tc_circ_std_deg,pitch_mean_deg,roll_mean_deg,gps_spd_mean
+s1,12.0,55.7,43.7,True,19.6,3.07,-0.1992,-8.7,254.0,1.18,-80.3,-150.0,0.0
+vw12,0.0,4.6,4.6,True,248.0,3.81,-0.7312,-3.4,254.7,1.27,-85.7,-142.8,24.09
