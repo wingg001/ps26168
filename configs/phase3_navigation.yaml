@@ -1,0 +1,38 @@
+blackout_start_s: 60.0
+blackout_duration_s: 30.0
+
+ukf:
+  alpha: 1.0
+  beta: 2.0
+  kappa: 0.0
+  Q_std:
+    pos: 0.1
+    vel: 0.05
+    euler: 0.01
+    accel_bias: 0.001
+    gyro_bias: 0.0001
+  R_std:
+    gnss_floor: 3.0
+    nhc: [0.5, 0.2]
+    zupt: 0.01
+    cnn_speed: 5.58  # Initial configurable measurement-uncertainty assumption (m/s)
+  gating:
+    gnss_nis_confidence: 0.95
+    gnss_dof: 2
+  gnss_noise:
+    mode: smartphone_accuracy # R3 default: 75th percentile of the phone's GPS ACCURACY over distinct fixes in the calibration window (smartphone-only; no reference data used). Alternatives: "empirical" = scalar R from phone-vs-reference residuals (reference-derived, kept ONLY for comparison/reproducibility); "per_sample" = per-fix GPS ACCURACY field.
+    sigma_floor_m: 3.0        # minimum uncertainty floor that prevents overconfidence (policy floor, not an experimentally validated value)
+    calibration_window_s: 60.0  # calibration over the full PRE-BLACKOUT region [0, 60s); strictly before the 60s blackout so the test window is never calibrated on
+    accuracy_cap_m: null      # optional DATA-QUALITY POLICY cap on GPS ACCURACY; readings > cap are excluded from calibration. Must be > 0 to be active. NOT a physical/validity bound.
+  zupt:
+    accel_var_multiplier: 1.5
+    gyro_mag_multiplier: 1.5
+  cnn:
+    time_tolerance_s: 0.15
+
+data:
+  manifest_path: "Phase2_Speed_Estimation_SIH26168/phase2_speed_estimation/reports/phase2/dataset_manifest.json"
+  phase2_preds_path: "Phase2_Speed_Estimation_SIH26168/phase2_speed_estimation/reports/phase2/phase2_test_predictions.csv"
+  time_alignment:
+    max_match_dt_s: 0.2
+    max_dt_s: 1.0

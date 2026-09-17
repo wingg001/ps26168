@@ -1,0 +1,25 @@
+{
+  "n_samples": 3,
+  "n_distinct_fixes": 532,
+  "n_repeated_rows_skipped": 51214,
+  "n_invalid_values_skipped": 0,
+  "window_start_s": 0.0,
+  "window_duration_s": 60.0,
+  "sigma_floor_m": 3.0,
+  "accuracy_median_m": 3.0,
+  "accuracy_min_m": 3.0,
+  "accuracy_max_m": 4.0,
+  "uncertainty_scale_m_75pct": 3.5,
+  "runtime_scale_m": 3.5,
+  "quality_cap_m": null,
+  "R_gnss": [
+    [
+      12.25,
+      0.0
+    ],
+    [
+      0.0,
+      12.25
+    ]
+  ]
+}
