@@ -145,6 +145,7 @@ def compute_initialization(
     R_veh,
     min_fixes=3,
     min_span_m=50.0,
+    first_fix_only=False,
 ):
     """Compute the runtime UKF initial state from SMARTPHONE data only.
 
@@ -157,6 +158,10 @@ def compute_initialization(
       logged reason when no valid speed or no reliable course exists.
 
     No V-file / reference value is accepted by this function.
+
+    When ``first_fix_only=True``, only the very first distinct GNSS fix is
+    considered for course estimation.  This enforces causal initialisation at
+    t=0: no future GNSS fix is used to compute the initial heading.
     """
     from src.phase1.alignment import apply_rotation
 
@@ -169,8 +174,18 @@ def compute_initialization(
     else:
         bias_source = "zero (Phase 1 static calibration invalid/non-stationary; no moving-data bias used)"
 
+    # Causal guard: at t=0 no future GNSS fixes exist.  When first_fix_only
+    # is set, restrict the distinct-fix mask to the first fix so that
+    # estimate_initial_course cannot reach into the future.
+    gnss_mask = np.asarray(gnss_distinct, dtype=bool)
+    if first_fix_only:
+        first_idx = np.flatnonzero(gnss_mask)
+        if len(first_idx) > 0:
+            gnss_mask = np.zeros_like(gnss_mask)
+            gnss_mask[first_idx[0]] = True
+
     est = estimate_initial_course(
-        phone_e_all, phone_n_all, gnss_distinct,
+        phone_e_all, phone_n_all, gnss_mask,
         min_fixes=min_fixes, min_span_m=min_span_m,
     )
     if est is not None:
@@ -490,37 +505,7 @@ def run_session(session_id, manifest, config):
         kappa=cfg_ukf["kappa"],
     )
 
-    # Initialize position from the first valid PHONE GNSS fix in the same LTP.
-    init_pos_set = False
-    for k0 in range(len(t_p)):
-        lat_g, lon_g = gnss_raw[k0]
-        if np.isfinite(lat_g) and np.isfinite(lon_g):
-            enu0 = ltp.to_enu(lat_g, lon_g)
-            ukf.x[0:3] = enu0
-            init_pos_e, init_pos_n = float(enu0[0]), float(enu0[1])
-            init_pos_set = True
-            break
-    if not init_pos_set:
-        raise ValueError("No valid phone GNSS position available to initialize UKF position.")
-
-    # Initial state from SMARTPHONE data only: zero-bias fallback when the Phase
-    # 1 static calibration is not stationary, legitimate phone GNSS speed, and a
-    # phone-GNSS-course heading (NO V-file / reference data enters this step).
-    init_est = compute_initialization(
-        phone_e_all,
-        phone_n_all,
-        gnss_distinct,
-        parse_phone_gnss_speed(df_p, p_map["gps_speed"]),
-        zupt_enabled,
-        calib_res.accel_bias,
-        calib_res.gyro_bias,
-        R_veh,
-    )
-    ukf.x[3:6] = init_est["init_vel"]
-    ukf.x[6:9] = [0.0, 0.0, init_est["init_yaw"]]
-    ukf.x[9:12] = init_est["accel_bias_veh"]
-    ukf.x[12:15] = init_est["gyro_bias_veh"]
-
+    # --- UKF noise / covariance (set once, applies to all sessions) ---
     Q = np.zeros(15, dtype=float)
     Q[0:3] = cfg_ukf["Q_std"]["pos"] ** 2
     Q[3:6] = cfg_ukf["Q_std"]["vel"] ** 2
@@ -529,9 +514,36 @@ def run_session(session_id, manifest, config):
     Q[12:15] = cfg_ukf["Q_std"]["gyro_bias"] ** 2
     ukf.Q = np.diag(Q)
 
+    P0 = np.zeros(15, dtype=float)
+    P0[0:3] = 4.0**2              # pos  m
+    P0[3:6] = 1.0**2              # vel  m/s
+    P0[6:9] = np.radians(5.0) ** 2  # euler rad
+    P0[9:12] = 0.05**2            # accel_bias m/s^2
+    P0[12:15] = 0.001**2          # gyro_bias rad/s
+    ukf.P = np.diag(P0)
+
+    # Pre-compute bias / vehicle-alignment state (needed whether or not
+    # delayed initialisation fires).
+    bias_est = compute_initialization(
+        phone_e_all, phone_n_all, gnss_distinct,
+        parse_phone_gnss_speed(df_p, p_map["gps_speed"]),
+        zupt_enabled, calib_res.accel_bias, calib_res.gyro_bias,
+        R_veh, first_fix_only=True,
+    )
+
+    # --- Causal delayed initialisation ---
+    # The UKF state is NOT set at t=0.  Instead we search for the first
+    # smartphone GNSS fix pair with span >= 50 m (the existing reliability
+    # threshold).  When found, we initialise position, velocity and yaw from
+    # that single causal baseline.  If no such pair exists before the
+    # blackout the filter stays dormant (s1 case).
+    phone_speed_mps = parse_phone_gnss_speed(df_p, p_map["gps_speed"])
+    ukf_initialized = False
+    init_timestamp = None
+
     # Store the initial state so trajectory length matches filter epochs.
-    results_pos = [ukf.x[0:2].copy()]
-    # Uncorrected INS baseline, initialized identically to the filter.
+    # Before initialisation the position is NaN (no valid estimate yet).
+    results_pos = [np.full(2, np.nan)]
     ins_state = ukf.x.copy()
     raw_ins_pos = [ins_state[0:2].copy()]
     gnss_plot_pos = []
@@ -560,23 +572,83 @@ def run_session(session_id, manifest, config):
         dt = float(t_p[k] - t_p[k - 1])
         if dt <= 0.0 or dt > float(config["data"]["time_alignment"].get("max_dt_s", 1.0)):
             counters["bad_timestamp"] += 1
-            results_pos.append(ukf.x[0:2].copy())
+            results_pos.append(ukf.x[0:2].copy() if ukf_initialized else np.full(2, np.nan))
             raw_ins_pos.append(ins_state[0:2].copy())
             continue
 
         u_k = imu_veh[k]
-        # Independent raw INS baseline: no GNSS, NHC, ZUPT or CNN updates.
+
+        # --- Causal delayed initialisation (runs once, before predict) ---
+        # Use the most recent consecutive distinct-fix pair whose displacement
+        # spans >= 50 m.  This avoids the unstable Fix0 position that can
+        # inflate the displacement speed by ~2x (ratio 1.83 vs expected ~1.0).
+        in_blackout_k = b_start <= t_p[k] < b_end
+        if (not ukf_initialized) and (not in_blackout_k):
+            dk_so_far = np.flatnonzero(gnss_distinct[: k + 1])
+            n_dk = len(dk_so_far)
+            if n_dk >= 3:
+                kb = int(dk_so_far[-1])
+                ka = int(dk_so_far[-2])
+                # Both fixes must be before blackout start.
+                if t_p[kb] < b_start and t_p[ka] < b_start:
+                    de = float(phone_e_all[kb] - phone_e_all[ka])
+                    dn = float(phone_n_all[kb] - phone_n_all[ka])
+                    span = float(np.hypot(de, dn))
+                    if span >= 50.0:
+                        course_deg = float(
+                            np.degrees(np.arctan2(de, dn))
+                        ) % 360.0
+                        yaw_rad = float(np.radians(90.0 - course_deg))
+                        causal_speed = float(phone_speed_mps[kb])
+
+                        # Full state init from the causal baseline.
+                        lat_g, lon_g = gnss_raw[kb]
+                        if np.isfinite(lat_g) and np.isfinite(lon_g):
+                            enu_kb = ltp.to_enu(lat_g, lon_g)
+                            ukf.x[0] = float(enu_kb[0])
+                            ukf.x[1] = float(enu_kb[1])
+                        ukf.x[2] = 0.0
+                        if causal_speed > 0.0:
+                            ukf.x[3] = causal_speed * np.sin(np.radians(course_deg))
+                            ukf.x[4] = causal_speed * np.cos(np.radians(course_deg))
+                        else:
+                            ukf.x[3] = 0.0
+                            ukf.x[4] = 0.0
+                        ukf.x[5] = 0.0
+                        ukf.x[6] = 0.0
+                        ukf.x[7] = 0.0
+                        ukf.x[8] = yaw_rad
+                        ukf.x[9:12] = bias_est["accel_bias_veh"]
+                        ukf.x[12:15] = bias_est["gyro_bias_veh"]
+                        ukf.P = np.diag(P0)
+
+                        ins_state = ukf.x.copy()
+                        ukf_initialized = True
+                        init_timestamp = float(t_p[kb] - t_p[0])
+                        print(
+                            f"  Delayed init at t={init_timestamp:.3f}s "
+                            f"(row {kb}): course={course_deg:.1f} deg, "
+                            f"speed={causal_speed:.2f} m/s, "
+                            f"pos=({ukf.x[0]:.2f}, {ukf.x[1]:.2f})"
+                        )
+
+        if not ukf_initialized:
+            # No qualifying baseline yet; keep filter dormant.
+            ins_state = propagate_ins_state(ins_state, u_k, dt)
+            raw_ins_pos.append(ins_state[0:2].copy())
+            results_pos.append(np.full(2, np.nan))
+            continue
+
+        # --- Normal UKF predict + update (only after initialisation) ---
         ins_state = propagate_ins_state(ins_state, u_k, dt)
         raw_ins_pos.append(ins_state[0:2].copy())
 
         ukf.predict(propagate_ins_state, dt, u_k)
 
-        in_blackout = b_start <= t_p[k] < b_end
-
         # GNSS update outside simulated blackout, applied ONLY to genuinely new
         # (distinct) fixes. Repeated 10 Hz rows carrying the same coordinates are
         # not independent measurements and never generate a second update.
-        if not in_blackout and gnss_distinct[k]:
+        if not in_blackout_k and gnss_distinct[k]:
             enu_meas = ltp.to_enu(gnss_raw[k, 0], gnss_raw[k, 1])[0:2]
             gnss_plot_pos.append((float(enu_meas[0]), float(enu_meas[1]), float(t_p[k] - t_p[0])))
             counters["gnss_events_attempted"] += 1
@@ -645,8 +717,8 @@ def run_session(session_id, manifest, config):
             errors_all.append(err)
             error_time.append(float(t_p[k] - t_p[0]))
             error_values.append(err)
-            blackout_flags.append(in_blackout)
-            if in_blackout:
+            blackout_flags.append(in_blackout_k)
+            if in_blackout_k:
                 errors_blackout.append(err)
 
     results_pos = np.asarray(results_pos, dtype=float)
@@ -680,18 +752,19 @@ def run_session(session_id, manifest, config):
     print(f"ZUPT enabled: {zupt_enabled}")
     # Initialization details (smartphone-only; informational).
     print("--- Initialization (smartphone data only) ---")
-    print(
-        "  pos=({:.1f}, {:.1f}) m | vel=({:.2f}, {:.2f}) m/s | yaw={:.2f} deg".format(
-            init_pos_e,
-            init_pos_n,
-            float(init_est["init_vel"][0]),
-            float(init_est["init_vel"][1]),
-            float(np.degrees(init_est["init_yaw"])),
+    if ukf_initialized:
+        print(
+            "  pos=({:.1f}, {:.1f}) m | vel=({:.2f}, {:.2f}) m/s | yaw={:.2f} deg".format(
+                float(ukf.x[0]),
+                float(ukf.x[1]),
+                float(ukf.x[3]),
+                float(ukf.x[4]),
+                float(np.degrees(ukf.x[8])),            )
         )
-    )
-    print("  bias: {}".format(init_est["bias_source"]))
-    print("  yaw:  {}".format(init_est["heading_source"]))
-    print("  vel:  {}".format(init_est["velocity_source"]))
+        print(f"  init_timestamp: {init_timestamp:.3f}s (delayed from t=0)")
+    else:
+        print("  NO INITIALISATION (no qualifying GNSS baseline before blackout)")
+    print("  bias: {}".format(bias_est["bias_source"]))
     if nis_vals:
         nis_all = np.array(nis_vals)
         print(f"GNSS NIS: median={np.median(nis_all):.1f} | p95={np.percentile(nis_all, 95):.1f} | "
@@ -749,17 +822,17 @@ def run_session(session_id, manifest, config):
         "gnss_sigma_m_calibration_only": (
             float(sigma_gnss) if sigma_gnss is not None else None
         ),
-        "init_pos_e_m": float(init_pos_e),
-        "init_pos_n_m": float(init_pos_n),
-        "init_vel_e_mps": float(init_est["init_vel"][0]),
-        "init_vel_n_mps": float(init_est["init_vel"][1]),
-        "init_vel_mag_mps": float(np.linalg.norm(init_est["init_vel"])),
-        "init_yaw_deg": float(np.degrees(init_est["init_yaw"])),
-        "init_heading_source": init_est["heading_source"],
-        "init_velocity_source": init_est["velocity_source"],
-        "init_bias_source": init_est["bias_source"],
-        "init_accel_bias_veh_xyz_mps2": [float(v) for v in init_est["accel_bias_veh"]],
-        "init_gyro_bias_veh_xyz_radps": [float(v) for v in init_est["gyro_bias_veh"]],
+        "init_pos_e_m": float(ukf.x[0]) if ukf_initialized else None,
+        "init_pos_n_m": float(ukf.x[1]) if ukf_initialized else None,
+        "init_vel_e_mps": float(ukf.x[3]) if ukf_initialized else 0.0,
+        "init_vel_n_mps": float(ukf.x[4]) if ukf_initialized else 0.0,
+        "init_vel_mag_mps": float(np.sqrt(ukf.x[3]**2 + ukf.x[4]**2)) if ukf_initialized else 0.0,
+        "init_yaw_deg": float(np.degrees(ukf.x[8])) if ukf_initialized else 0.0,
+        "init_heading_source": "delayed causal baseline" if ukf_initialized else "no qualifying baseline before blackout",
+        "init_velocity_source": "phone GNSS speed + displacement course" if ukf_initialized else "no qualifying baseline before blackout",
+        "init_bias_source": bias_est["bias_source"],
+        "init_accel_bias_veh_xyz_mps2": [float(v) for v in bias_est["accel_bias_veh"]],
+        "init_gyro_bias_veh_xyz_radps": [float(v) for v in bias_est["gyro_bias_veh"]],
     }
     pd.DataFrame([metrics]).to_csv(out_dir / f"{session_id}_metrics.csv", index=False)
     with (out_dir / f"{session_id}_metrics.json").open("w", encoding="utf-8") as f:
