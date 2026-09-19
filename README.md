@@ -15,7 +15,7 @@ GNSS/INS fusion pipeline for **SIH 2026 Problem Statement 26168**. Fuses smartph
 | 2 | CNN speed estimation model | Complete |
 | 3 | INS mechanization / dead reckoning | Complete |
 | 4 | GNSS + INS fusion (UKF) | **Complete** |
-| 5 | Map matching (HMM + road network) | Next |
+| 5 | Map matching (HMM + road network) | **Complete** |
 | 6 | Seamless GNSS deficit handler | Deferred |
 | 7 | Mobile app (Android) | Deferred |
 | 8 | Edge-deployable engine | Deferred |
@@ -46,9 +46,31 @@ Constraint ablation on S1 showed substantial degradation when individual constra
 
 See `reports/phase4/PHASE4_HANDOFF.md` for the full technical handoff.
 
-## Phase 5: Map Matching (Next)
+## Phase 5: Map Matching — Complete
 
-HMM-based map matching to snap the fused trajectory onto the OSM road network. Emission probabilities from INS/GNSS-to-road distance; transition probabilities from road-network path likelihood. This is the next development milestone.
+HMM/Viterbi trajectory-level map matching that snaps phone-GNSS trajectory points onto the OSM road network. Uses OpenStreetMap road graphs via OSMnx, UTM-projected metre-scale distances, and a two-stage pipeline: candidate generation then Viterbi decoding.
+
+**Components:**
+
+- **Road graph** (`src/maps/road_graph.py`): Downloads a directed drivable-road graph from OSM via OSMnx. Nodes carry lat/lon; edges carry `length` (metres) and `geometry`.
+- **Nearest-edge baseline** (`src/maps/map_match.py`): Matches each point independently to its nearest graph edge via OSMnx `nearest_edges`. No path continuity.
+- **Multi-candidate generation** (`src/maps/map_match.py`): Projects both edges and points to local UTM CRS. For each trajectory point, finds all edges within a radius (default 30 m) and returns up to `max_candidates` (default 5) nearest candidates with metre-scale perpendicular distances.
+- **HMM/Viterbi matcher** (`src/maps/hmm_match.py`): Selects one candidate edge per point by minimising a combined emission + transition cost using Viterbi decoding. Emission cost penalises point-to-edge distance; transition cost penalises mismatch between network travel distance and observed inter-point distance.
+
+**Real S1 results** (530 phone-GNSS points, `radius_m=30`, `emission_sigma_m=10.0`, `transition_sigma_m=20.0`):
+
+| Metric | Nearest-edge | HMM/Viterbi |
+|--------|:-:|:-:|
+| Matched points | 530/530 | 520/530 |
+| Unique matched edges | 325 | 326 |
+| Same-edge continuity | 25.9% | 28.4% |
+| Connected transitions | 74.1% | 71.6% |
+| Mean snap distance | 3.43 m | 4.82 m |
+| Max snap distance | 71.13 m | 29.98 m |
+
+The HMM trades some per-point proximity for trajectory/network consistency — its max snap distance is 30 m versus 71 m for nearest-edge. 10 points (leading, gap, and trailing) are left unmatched. No reference/V trajectory data is used as estimator input. Offline ground-truth accuracy evaluation is separate.
+
+See `reports/phase5/PHASE5_HANDOFF.md` for the full technical handoff.
 
 ## Run Phase 0
 
