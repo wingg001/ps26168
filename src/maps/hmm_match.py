@@ -214,6 +214,7 @@ def match_trajectory_hmm(
         return HMMMatchResult(
             edges=np.full((n_points, 3), _UNMATCHED_EDGE, dtype=np.int64),
             total_cost=0.0,
+            costs=np.zeros(n_points, dtype=np.float64),
         )
 
     # Pre-compute emission costs
@@ -228,16 +229,30 @@ def match_trajectory_hmm(
     back = np.full((n_points, n_total), -1, dtype=np.int64)
     back_time = np.full((n_points, n_total), -1, dtype=np.int64)
 
-    # Initialise t = 0
-    s0, e0 = point_slices[0]
+    # Find first candidate-bearing point for initialisation
+    t_start = 0
+    while t_start < n_points:
+        s_ts, e_ts = point_slices[t_start]
+        if s_ts < e_ts:
+            break
+        t_start += 1
+
+    if t_start >= n_points:
+        return HMMMatchResult(
+            edges=np.full((n_points, 3), _UNMATCHED_EDGE, dtype=np.int64),
+            total_cost=0.0,
+            costs=np.zeros(n_points, dtype=np.float64),
+        )
+
+    s0, e0 = point_slices[t_start]
     for ci in range(s0, e0):
         cum[ci] = emit[ci]
 
     # Track the last time step that had candidates (for bridging gaps)
-    last_valid_t = 0
+    last_valid_t = t_start
 
     # Forward pass
-    for t in range(1, n_points):
+    for t in range(t_start + 1, n_points):
         s_curr, e_curr = point_slices[t]
 
         if s_curr == e_curr:
@@ -279,20 +294,25 @@ def match_trajectory_hmm(
     # ------------------------------------------------------------------
     selected_global = np.full(n_points, -1, dtype=np.int64)
 
-    # Find best final candidate (only among points that had candidates)
+    # Find best final candidate among reachable candidate-bearing points
     best_final = -1
     best_cost = _INF_COST
-    s_last, e_last = point_slices[-1]
-    for ci in range(s_last, e_last):
-        if cum[ci] < best_cost:
-            best_cost = cum[ci]
-            best_final = ci
+    t_end = -1
+    for t_scan in range(n_points - 1, -1, -1):
+        s_te, e_te = point_slices[t_scan]
+        for ci in range(s_te, e_te):
+            if cum[ci] < best_cost:
+                best_cost = cum[ci]
+                best_final = ci
+                t_end = t_scan
+        if best_final >= 0:
+            break
 
     if best_final >= 0:
-        selected_global[-1] = best_final
+        selected_global[t_end] = best_final
         cur = best_final
-        t = n_points - 1
-        while t > 0:
+        t = t_end
+        while t > t_start:
             s_t, e_t = point_slices[t]
             if s_t == e_t:
                 t -= 1

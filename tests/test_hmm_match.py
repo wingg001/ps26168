@@ -446,5 +446,122 @@ class TestViterbiPathUnchanged(unittest.TestCase):
         self.assertEqual(r.edges[2].tolist(), [1, 2, 0])
 
 
+class TestLeadingZeroCandidates(unittest.TestCase):
+    """First point has zero candidates; Viterbi must initialise at the first
+    candidate-bearing point and leave leading points unmatched."""
+
+    def test_leading_unmatched_first_candidate_valid(self):
+        """Point 0: zero candidates, Point 1: candidates, Point 2: candidates."""
+        result = _mock_hmm(
+            [0.00002, 0.00102, 0.00202], [0.0005, 0.0015, 0.0025],
+            _make_candidates([
+                [],
+                [((0, 1, 0), 2.0)],
+                [((1, 2, 0), 2.0)],
+            ]),
+            emission_sigma_m=5.0,
+            transition_sigma_m=30.0,
+        )
+        # Point 0 is unmatched
+        self.assertEqual(result.edges[0].tolist(), [-1, -1, -1])
+        self.assertEqual(result.costs[0], 0.0)
+        # Points 1 and 2 are matched
+        self.assertEqual(result.edges[1].tolist(), [0, 1, 0])
+        self.assertEqual(result.edges[2].tolist(), [1, 2, 0])
+        # Point 1 is the first matched — cost is emission only
+        self.assertGreater(result.costs[1], 0.0)
+        # Point 2 cost includes transition from point 1
+        self.assertGreater(result.costs[2], 0.0)
+        # Total is finite and consistent
+        self.assertFalse(np.isinf(result.total_cost))
+        self.assertAlmostEqual(result.total_cost, result.costs.sum(), places=6)
+
+    def test_leading_unmatched_all_points(self):
+        """Only Point 1 has candidates; Point 0 leading, Point 2 trailing."""
+        result = _mock_hmm(
+            [0.00002, 0.00102, 0.00202], [0.0005, 0.0015, 0.0025],
+            _make_candidates([
+                [],
+                [((0, 1, 0), 2.0)],
+                [],
+            ]),
+            emission_sigma_m=5.0,
+            transition_sigma_m=30.0,
+        )
+        self.assertEqual(result.edges[0].tolist(), [-1, -1, -1])
+        self.assertEqual(result.edges[1].tolist(), [0, 1, 0])
+        self.assertEqual(result.edges[2].tolist(), [-1, -1, -1])
+        self.assertEqual(result.costs[0], 0.0)
+        self.assertGreater(result.costs[1], 0.0)
+        self.assertEqual(result.costs[2], 0.0)
+        self.assertAlmostEqual(result.total_cost, result.costs.sum(), places=6)
+
+
+class TestTrailingZeroCandidates(unittest.TestCase):
+    """Last points have zero candidates; backtracing must find the best
+    reachable candidate-bearing point instead of requiring the last point."""
+
+    def test_trailing_unmatched(self):
+        """Point 0 and 1 matched, Point 2 trailing with zero candidates."""
+        result = _mock_hmm(
+            [0.00002, 0.00102, 0.00202], [0.0005, 0.0015, 0.0025],
+            _make_candidates([
+                [((0, 1, 0), 2.0)],
+                [((1, 2, 0), 2.0)],
+                [],
+            ]),
+            emission_sigma_m=5.0,
+            transition_sigma_m=30.0,
+        )
+        self.assertEqual(result.edges[0].tolist(), [0, 1, 0])
+        self.assertEqual(result.edges[1].tolist(), [1, 2, 0])
+        self.assertEqual(result.edges[2].tolist(), [-1, -1, -1])
+        self.assertGreater(result.costs[0], 0.0)
+        self.assertGreater(result.costs[1], 0.0)
+        self.assertEqual(result.costs[2], 0.0)
+        self.assertFalse(np.isinf(result.total_cost))
+        self.assertAlmostEqual(result.total_cost, result.costs.sum(), places=6)
+
+
+class TestAllZeroCandidates(unittest.TestCase):
+    """All points have zero candidates — output is all unmatched, cost is 0."""
+
+    def test_all_zero(self):
+        result = _mock_hmm(
+            [0.00002, 0.00102], [0.0005, 0.0015],
+            _make_candidates([[], []]),
+            emission_sigma_m=5.0,
+            transition_sigma_m=30.0,
+        )
+        np.testing.assert_array_equal(
+            result.edges, np.full((2, 3), [-1, -1, -1])
+        )
+        self.assertEqual(result.total_cost, 0.0)
+        np.testing.assert_array_equal(result.costs, [0.0, 0.0])
+
+
+class TestNormalT0Init(unittest.TestCase):
+    """Normal t=0 initialisation still works (no leading zeros)."""
+
+    def test_t0_has_candidates(self):
+        result = _mock_hmm(
+            [0.00002, 0.00102, 0.00202], [0.0005, 0.0015, 0.0025],
+            _make_candidates([
+                [((0, 1, 0), 2.0)],
+                [((0, 1, 0), 2.0)],
+                [((1, 2, 0), 2.0)],
+            ]),
+            emission_sigma_m=5.0,
+            transition_sigma_m=30.0,
+        )
+        self.assertEqual(result.edges[0].tolist(), [0, 1, 0])
+        self.assertEqual(result.edges[1].tolist(), [0, 1, 0])
+        self.assertEqual(result.edges[2].tolist(), [1, 2, 0])
+        self.assertGreater(result.costs[0], 0.0)
+        self.assertGreater(result.costs[1], 0.0)
+        self.assertGreater(result.costs[2], 0.0)
+        self.assertAlmostEqual(result.total_cost, result.costs.sum(), places=6)
+
+
 if __name__ == "__main__":
     unittest.main()
