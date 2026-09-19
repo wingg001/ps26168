@@ -9,12 +9,15 @@ and does not perform HMM smoothing or routing.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Sequence, Union
+from dataclasses import dataclass, field
+from typing import List, Sequence, Union
 
+import geopandas as gpd
 import networkx as nx
 import numpy as np
 import numpy.typing as npt
+import osmnx as ox
+from shapely.geometry import Point
 
 from src.maps.road_graph import find_nearest_edges
 
@@ -114,3 +117,130 @@ def match_trajectory_nearest(
         dist_arr = np.zeros(edges.shape[0], dtype=np.float64)
 
     return MatchResult(edges=edges, distances=dist_arr)
+
+
+@dataclass
+class EdgeCandidate:
+    """A single road-edge candidate for a trajectory point.
+
+    Attributes
+    ----------
+    edge : tuple[int, int, int]
+        Edge ID as ``(u, v, key)``.
+    distance_m : float
+        Perpendicular distance from the trajectory point to the edge
+        geometry, in metres.
+    """
+
+    edge: tuple[int, int, int]
+    distance_m: float
+
+
+@dataclass
+class CandidateResult:
+    """Container for per-point edge-candidate lists.
+
+    Attributes
+    ----------
+    candidates : list[list[EdgeCandidate]]
+        One inner list per trajectory point.  Each inner list contains
+        :class:`EdgeCandidate` instances sorted nearest-first, with at
+        most *max_candidates* entries.  Points with no nearby edges
+        have an empty inner list.
+    """
+
+    candidates: List[List[EdgeCandidate]] = field(default_factory=list)
+
+
+def find_edge_candidates(
+    graph: nx.MultiDiGraph,
+    latitudes: Union[Sequence[float], npt.NDArray[np.floating]],
+    longitudes: Union[Sequence[float], npt.NDArray[np.floating]],
+    *,
+    radius_m: float,
+    max_candidates: int,
+) -> CandidateResult:
+    """Find nearby road-edge candidates for each trajectory point.
+
+    Projects both the road-graph edges and the trajectory points to
+    EPSG:3857 (Web Mercator) so that all distance calculations are
+    performed in metres.
+
+    Parameters
+    ----------
+    graph : networkx.MultiDiGraph
+        Road graph (e.g. from :func:`build_road_graph`).
+    latitudes : array-like
+        Latitude(s) of the trajectory points (degrees, EPSG:4326).
+    longitudes : array-like
+        Longitude(s) of the trajectory points (degrees, EPSG:4326).
+    radius_m : float
+        Search radius in metres.  Only edges whose geometry comes
+        within this distance of a trajectory point are returned as
+        candidates.
+    max_candidates : int
+        Maximum number of candidates retained per point (sorted
+        nearest-first).
+
+    Returns
+    -------
+    CandidateResult
+        ``candidates[i]`` is a list of :class:`EdgeCandidate` for
+        trajectory point *i*, sorted by ascending distance.
+
+    Raises
+    ------
+    ValueError
+        If *latitudes* and *longitudes* have different lengths.
+    """
+    lat_arr = np.asarray(latitudes, dtype=np.float64)
+    lon_arr = np.asarray(longitudes, dtype=np.float64)
+
+    if lat_arr.shape != lon_arr.shape:
+        raise ValueError(
+            f"latitudes length {lat_arr.size} does not match "
+            f"longitudes length {lon_arr.size}"
+        )
+
+    if lat_arr.size == 0:
+        return CandidateResult(candidates=[])
+
+    # Extract edge GeoDataFrame from the graph (EPSG:4326 by default)
+    _nodes, edges_gdf = ox.graph_to_gdfs(graph)
+
+    # Derive a local UTM CRS from the edge geometries for accurate
+    # metre-scale distance calculations (avoids EPSG:3857 distortion).
+    utm_crs = edges_gdf.estimate_utm_crs()
+    edges_proj = edges_gdf.to_crs(utm_crs)
+
+    # Build trajectory-point GeoDataFrame and project to the same UTM CRS
+    pts_gdf = gpd.GeoDataFrame(
+        geometry=[Point(lon, lat) for lon, lat in zip(lon_arr, lat_arr)],
+        crs="EPSG:4326",
+    )
+    pts_proj = pts_gdf.to_crs(utm_crs)
+
+    # Spatial index for fast radius queries
+    sindex = edges_proj.sindex
+
+    candidates: List[List[EdgeCandidate]] = []
+
+    for pt in pts_proj.geometry:
+        # Buffer the point and query the spatial index
+        buf = pt.buffer(radius_m)
+        possible_idx = list(sindex.intersection(buf.bounds))
+
+        # Collect candidates that truly intersect the buffer
+        nearby = []
+        for idx in possible_idx:
+            edge_geom = edges_proj.geometry.iloc[idx]
+            dist = pt.distance(edge_geom)
+            if dist <= radius_m:
+                u, v, k = edges_proj.index[idx]
+                nearby.append(EdgeCandidate(edge=(u, v, k), distance_m=dist))
+
+        # Sort nearest-first and cap at max_candidates
+        nearby.sort(key=lambda c: c.distance_m)
+        candidates.append(nearby[:max_candidates])
+
+    return CandidateResult(candidates=candidates)
