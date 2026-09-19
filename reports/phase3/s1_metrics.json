@@ -65,5 +65,10 @@
     "degraded": 2.0,
     "outage": 4.0,
     "recovery": 1.5
-  }
+  },
+  "recovery_probes_attempted": 0,
+  "recovery_fixes_accepted": 0,
+  "recovery_fixes_rejected": 0,
+  "no_fix_timeout_events": 0,
+  "no_fix_timeout_s": 5.0
 }
