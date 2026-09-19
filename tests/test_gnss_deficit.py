@@ -495,5 +495,158 @@ class TestFullCycle(unittest.TestCase):
         self.assertEqual(m.state, GnssState.NORMAL)
 
 
+class TestNoFixTimeout(unittest.TestCase):
+    """No-fix timeout: NORMAL/DEGRADED -> OUTAGE when no GNSS observation for timeout_s."""
+
+    def test_no_timeout_before_threshold(self):
+        m = _default_manager(no_fix_timeout_s=5.0)
+        _push_good(m, t_s=0.0)
+        # check_timeout at t=4.9 — below timeout.
+        s = m.check_timeout(t_s=4.9)
+        self.assertEqual(s, GnssState.NORMAL)
+
+    def test_timeout_exactly_at_threshold(self):
+        m = _default_manager(no_fix_timeout_s=5.0)
+        _push_good(m, t_s=0.0)
+        # check_timeout at t=5.0 — exactly at timeout.
+        s = m.check_timeout(t_s=5.0)
+        self.assertEqual(s, GnssState.OUTAGE)
+
+    def test_timeout_after_threshold(self):
+        m = _default_manager(no_fix_timeout_s=5.0)
+        _push_good(m, t_s=0.0)
+        s = m.check_timeout(t_s=10.0)
+        self.assertEqual(s, GnssState.OUTAGE)
+
+    def test_accepted_gnss_resets_activity(self):
+        m = _default_manager(no_fix_timeout_s=5.0)
+        _push_good(m, t_s=0.0)
+        m.check_timeout(t_s=3.0)
+        # Another GNSS observation at t=4 resets the timer.
+        _push_good(m, t_s=4.0)
+        # check_timeout at t=8.0 — only 4s since last activity.
+        s = m.check_timeout(t_s=8.0)
+        self.assertEqual(s, GnssState.NORMAL)
+
+    def test_rejected_gnss_resets_activity(self):
+        m = _default_manager(no_fix_timeout_s=5.0)
+        _push_good(m, t_s=0.0)
+        m.check_timeout(t_s=3.0)
+        # A rejected GNSS observation at t=4 still counts as activity.
+        _push_bad_reject(m, t_s=4.0)
+        # check_timeout at t=8.0 — only 4s since last activity.
+        s = m.check_timeout(t_s=8.0)
+        self.assertEqual(s, GnssState.NORMAL)
+
+    def test_no_fix_period_transitions_to_outage(self):
+        m = _default_manager(no_fix_timeout_s=5.0)
+        _push_good(m, t_s=0.0)
+        # Simulate 6 seconds with no GNSS fixes.
+        for t in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]:
+            s = m.check_timeout(t_s=t)
+        self.assertEqual(s, GnssState.OUTAGE)
+
+    def test_timeout_from_degraded(self):
+        m = _default_manager(nis_window=3, no_fix_timeout_s=5.0)
+        # Push into DEGRADED.
+        _push_good(m, t_s=0.0)
+        for i in range(3):
+            _push_bad_reject(m, t_s=float(1 + i))
+        self.assertEqual(m.state, GnssState.DEGRADED)
+        # Simulate 6 seconds with no GNSS fixes.
+        for t in [5.0, 6.0, 7.0, 8.0, 9.0, 10.0]:
+            s = m.check_timeout(t_s=t)
+        self.assertEqual(s, GnssState.OUTAGE)
+
+    def test_recovery_probe_after_timeout_outage(self):
+        m = _default_manager(nis_window=3, no_fix_timeout_s=5.0)
+        _push_good(m, t_s=0.0)
+        for t in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]:
+            m.check_timeout(t_s=t)
+        self.assertEqual(m.state, GnssState.OUTAGE)
+        # A recovery probe (accepted GNSS) should enter RECOVERY.
+        s = _push_good(m, t_s=7.0)
+        self.assertEqual(s, GnssState.RECOVERY)
+
+    def test_backward_timestamp_raises(self):
+        m = _default_manager(no_fix_timeout_s=5.0)
+        _push_good(m, t_s=0.0)
+        m.check_timeout(t_s=3.0)
+        with self.assertRaises(ValueError):
+            m.check_timeout(t_s=2.0)
+
+    def test_nan_timestamp_raises(self):
+        m = _default_manager(no_fix_timeout_s=5.0)
+        with self.assertRaises(ValueError):
+            m.check_timeout(t_s=float("nan"))
+
+    def test_no_fake_gnss_observation(self):
+        """check_timeout must not create a GNSS observation."""
+        m = _default_manager(no_fix_timeout_s=5.0)
+        _push_good(m, t_s=0.0)
+        n_nis_before = len(m._nis_history)
+        n_acc_before = len(m._accuracy_history)
+        m.check_timeout(t_s=6.0)
+        # Histories should not grow from check_timeout.
+        self.assertEqual(len(m._nis_history), n_nis_before)
+        self.assertEqual(len(m._accuracy_history), n_acc_before)
+
+    def test_no_timeout_without_activity(self):
+        """If no GNSS observation has ever been received, timeout cannot trigger."""
+        m = _default_manager(no_fix_timeout_s=5.0)
+        # Never called update — _last_gnss_activity_t is None.
+        s = m.check_timeout(t_s=100.0)
+        self.assertEqual(s, GnssState.NORMAL)
+
+    def test_timeout_does_not_affect_recovery(self):
+        """check_timeout in RECOVERY state should not change state."""
+        m = _default_manager(nis_window=3, no_fix_timeout_s=5.0)
+        # Push to OUTAGE.
+        _push_good(m, t_s=0.0)
+        for i in range(3):
+            _push_bad_reject(m, t_s=float(1 + i))
+        for i in range(3):
+            _push_bad_reject(m, t_s=float(4 + i))
+        self.assertEqual(m.state, GnssState.OUTAGE)
+        # Enter RECOVERY.
+        _push_good(m, t_s=10.0)
+        self.assertEqual(m.state, GnssState.RECOVERY)
+        # Long timeout should not change RECOVERY.
+        s = m.check_timeout(t_s=100.0)
+        self.assertEqual(s, GnssState.RECOVERY)
+
+
+class TestNoFixTimeoutValidation(unittest.TestCase):
+    """no_fix_timeout_s constructor parameter must be validated."""
+
+    def test_zero_raises(self):
+        with self.assertRaises(ValueError):
+            GnssDeficitManager(
+                nis_window=5, nis_threshold=6.0, accuracy_threshold_m=30.0,
+                no_fix_timeout_s=0.0,
+            )
+
+    def test_negative_raises(self):
+        with self.assertRaises(ValueError):
+            GnssDeficitManager(
+                nis_window=5, nis_threshold=6.0, accuracy_threshold_m=30.0,
+                no_fix_timeout_s=-1.0,
+            )
+
+    def test_nan_raises(self):
+        with self.assertRaises(ValueError):
+            GnssDeficitManager(
+                nis_window=5, nis_threshold=6.0, accuracy_threshold_m=30.0,
+                no_fix_timeout_s=float("nan"),
+            )
+
+    def test_non_numeric_raises(self):
+        with self.assertRaises(TypeError):
+            GnssDeficitManager(
+                nis_window=5, nis_threshold=6.0, accuracy_threshold_m=30.0,
+                no_fix_timeout_s="bad",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -567,6 +567,7 @@ def run_session(session_id, manifest, config):
         "recovery_probes_attempted": 0,
         "recovery_fixes_accepted": 0,
         "recovery_fixes_rejected": 0,
+        "no_fix_timeout_events": 0,
     }
     nis_vals = []
 
@@ -578,6 +579,7 @@ def run_session(session_id, manifest, config):
         accuracy_threshold_m=float(cfg_deficit.get("accuracy_threshold_m", 30.0)),
         outage_min_s=float(cfg_deficit.get("outage_min_s", 3.0)),
         q_scales=cfg_deficit.get("q_scales"),
+        no_fix_timeout_s=float(cfg_deficit.get("no_fix_timeout_s", 5.0)),
     )
     gnss_state_counts = {s.value: 0 for s in GnssState}
     baseline_Q = ukf.Q.copy()
@@ -715,12 +717,20 @@ def run_session(session_id, manifest, config):
                 counters["gnss_numerical_fail"] += 1
 
         # Phase 6: feed the GNSS deficit manager (observation only).
-        gnss_deficit.update(
-            t_s=float(t_p[k] - t_p[0]),
-            gnss_accepted=bool(success and accepted),
-            nis=float(nis),
-            gps_accuracy_m=float(gnss_acc[k]) if np.isfinite(gnss_acc[k]) else float("nan"),
-        )
+        if gnss_attempted:
+            # GNSS measurement received — update state machine.
+            gnss_deficit.update(
+                t_s=float(t_p[k] - t_p[0]),
+                gnss_accepted=bool(success and accepted),
+                nis=float(nis),
+                gps_accuracy_m=float(gnss_acc[k]) if np.isfinite(gnss_acc[k]) else float("nan"),
+            )
+        else:
+            # No GNSS fix this epoch — check no-fix timeout.
+            prev_state = gnss_deficit.state
+            gnss_deficit.check_timeout(t_s=float(t_p[k] - t_p[0]))
+            if gnss_deficit.state == GnssState.OUTAGE and prev_state != GnssState.OUTAGE:
+                counters["no_fix_timeout_events"] += 1
         gnss_state_counts[gnss_deficit.state.value] += 1
 
         # ZUPT / NHC / CNN.
@@ -813,6 +823,10 @@ def run_session(session_id, manifest, config):
         f"Recovery Probes: {counters['recovery_probes_attempted']} attempted | "
         f"{counters['recovery_fixes_accepted']} accepted | "
         f"{counters['recovery_fixes_rejected']} rejected"
+    )
+    print(
+        f"No-Fix Timeout: {counters['no_fix_timeout_events']} events "
+        f"(timeout={gnss_deficit._no_fix_timeout_s:.1f}s)"
     )
     # Initialization details (smartphone-only; informational).
     print("--- Initialization (smartphone data only) ---")
@@ -907,6 +921,8 @@ def run_session(session_id, manifest, config):
         "recovery_probes_attempted": counters["recovery_probes_attempted"],
         "recovery_fixes_accepted": counters["recovery_fixes_accepted"],
         "recovery_fixes_rejected": counters["recovery_fixes_rejected"],
+        "no_fix_timeout_events": counters["no_fix_timeout_events"],
+        "no_fix_timeout_s": gnss_deficit._no_fix_timeout_s,
     }
     pd.DataFrame([metrics]).to_csv(out_dir / f"{session_id}_metrics.csv", index=False)
     with (out_dir / f"{session_id}_metrics.json").open("w", encoding="utf-8") as f:

@@ -24,9 +24,10 @@ def _push_bad_reject(m, t_s, nis=20.0, acc=50.0):
     return m.update(t_s=t_s, gnss_accepted=False, nis=nis, gps_accuracy_m=acc)
 
 
-def _simulate_session_feed(n_epochs=200, blackout_start=60, blackout_duration=30):
+def _simulate_session_feed(n_epochs=200, blackout_start=60, blackout_duration=30,
+                           no_fix_timeout_s=5.0):
     """Simulate the GNSS update sequence that run_phase3.py would feed to the
-    GnssDeficitManager, and return (manager, state_counts).
+    GnssDeficitManager, and return (manager, state_counts, counters).
 
     This mirrors the integration logic without needing a full UKF run.
     """
@@ -37,8 +38,10 @@ def _simulate_session_feed(n_epochs=200, blackout_start=60, blackout_duration=30
         nis_threshold=5.99,
         accuracy_threshold_m=30.0,
         outage_min_s=3.0,
+        no_fix_timeout_s=no_fix_timeout_s,
     )
     state_counts = {s.value: 0 for s in GnssState}
+    counters = {"no_fix_timeout_events": 0}
 
     dt = 0.1  # 10 Hz
     for k in range(1, n_epochs):
@@ -51,21 +54,20 @@ def _simulate_session_feed(n_epochs=200, blackout_start=60, blackout_duration=30
             accepted = True
             nis = 1.0
             acc = 5.0
+            manager.update(
+                t_s=t_s,
+                gnss_accepted=bool(success and accepted),
+                nis=float(nis),
+                gps_accuracy_m=float(acc),
+            )
         else:
-            success = False
-            accepted = False
-            nis = float("nan")
-            acc = float("nan")
-
-        manager.update(
-            t_s=t_s,
-            gnss_accepted=bool(success and accepted),
-            nis=float(nis),
-            gps_accuracy_m=float(acc),
-        )
+            prev_state = manager.state
+            manager.check_timeout(t_s=t_s)
+            if manager.state == GnssState.OUTAGE and prev_state != GnssState.OUTAGE:
+                counters["no_fix_timeout_events"] += 1
         state_counts[manager.state.value] += 1
 
-    return manager, state_counts
+    return manager, state_counts, counters
 
 
 # ---------------------------------------------------------------------------
@@ -163,13 +165,13 @@ class TestStateCountTracking(unittest.TestCase):
     """Verify state counts are correctly tracked during a simulated session."""
 
     def test_all_epochs_counted(self):
-        manager, state_counts = _simulate_session_feed(n_epochs=200, blackout_start=60, blackout_duration=30)
+        manager, state_counts, _ = _simulate_session_feed(n_epochs=200, blackout_start=60, blackout_duration=30)
         total = sum(state_counts.values())
         # Epochs 1..199 = 199 epochs (k=0 is skipped in filter loop).
         self.assertEqual(total, 199)
 
     def test_normal_dominates_without_degradation(self):
-        manager, state_counts = _simulate_session_feed(n_epochs=200, blackout_start=60, blackout_duration=30)
+        manager, state_counts, _ = _simulate_session_feed(n_epochs=200, blackout_start=60, blackout_duration=30)
         # With all good GNSS during non-blackout, state should stay NORMAL.
         self.assertGreater(state_counts["normal"], 0)
 
@@ -559,6 +561,80 @@ class TestRecoveryProbeCounters(unittest.TestCase):
         self.assertEqual(counters["recovery_probes_attempted"], 5)
         self.assertEqual(counters["recovery_fixes_accepted"], 2)
         self.assertEqual(counters["recovery_fixes_rejected"], 3)
+
+
+class TestNoFixTimeoutIntegration(unittest.TestCase):
+    """Integration tests for no-fix timeout behavior in the navigation loop."""
+
+    def test_timeout_events_tracked(self):
+        """Blackout longer than timeout produces at least one timeout event."""
+        from src.filters.gnss_deficit import GnssDeficitManager, GnssState
+
+        manager = GnssDeficitManager(
+            nis_window=10, nis_threshold=5.99, accuracy_threshold_m=30.0,
+            outage_min_s=3.0, no_fix_timeout_s=5.0,
+        )
+        timeout_events = 0
+        dt = 0.1
+        for k in range(1, 200):
+            t_s = k * dt
+            in_blackout = 10.0 <= t_s < 40.0
+            if not in_blackout:
+                manager.update(t_s=t_s, gnss_accepted=True, nis=1.0, gps_accuracy_m=5.0)
+            else:
+                prev = manager.state
+                manager.check_timeout(t_s=t_s)
+                if manager.state == GnssState.OUTAGE and prev != GnssState.OUTAGE:
+                    timeout_events += 1
+        self.assertGreater(timeout_events, 0)
+
+    def test_outage_from_timeout_allows_recovery(self):
+        """Timeout-triggered OUTAGE can still recover via accepted GNSS fix."""
+        from src.filters.gnss_deficit import GnssDeficitManager, GnssState
+
+        manager = GnssDeficitManager(
+            nis_window=5, nis_threshold=5.99, accuracy_threshold_m=30.0,
+            outage_min_s=3.0, no_fix_timeout_s=5.0,
+        )
+        # Good GNSS then timeout.
+        _push_good(manager, t_s=0.0)
+        for t in [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]:
+            manager.check_timeout(t_s=t)
+        self.assertEqual(manager.state, GnssState.OUTAGE)
+        # Recovery probe accepted.
+        s = _push_good(manager, t_s=7.0)
+        self.assertEqual(s, GnssState.RECOVERY)
+
+    def test_no_fix_timeout_s_from_config(self):
+        """no_fix_timeout_s is correctly read from config dict."""
+        from src.filters.gnss_deficit import GnssDeficitManager
+
+        cfg_deficit = {
+            "nis_window": 10,
+            "nis_threshold": 5.99,
+            "accuracy_threshold_m": 30.0,
+            "outage_min_s": 3.0,
+            "no_fix_timeout_s": 8.0,
+        }
+        manager = GnssDeficitManager(
+            nis_window=int(cfg_deficit.get("nis_window", 10)),
+            nis_threshold=float(cfg_deficit.get("nis_threshold", 5.99)),
+            accuracy_threshold_m=float(cfg_deficit.get("accuracy_threshold_m", 30.0)),
+            outage_min_s=float(cfg_deficit.get("outage_min_s", 3.0)),
+            no_fix_timeout_s=float(cfg_deficit.get("no_fix_timeout_s", 5.0)),
+        )
+        self.assertAlmostEqual(manager._no_fix_timeout_s, 8.0)
+
+    def test_simulated_session_with_timeout(self):
+        """Full session simulation with timeout integration."""
+        manager, state_counts, counters = _simulate_session_feed(
+            n_epochs=1000, blackout_start=60, blackout_duration=30,
+            no_fix_timeout_s=5.0,
+        )
+        total = sum(state_counts.values())
+        self.assertEqual(total, 999)
+        # Blackout is 30s, timeout is 5s -> at least one timeout event.
+        self.assertGreater(counters["no_fix_timeout_events"], 0)
 
 
 if __name__ == "__main__":

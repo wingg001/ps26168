@@ -35,6 +35,14 @@ Transition rules (evaluated in order each :meth:`update` call):
    More than half of recent NIS/accuracy samples are poor, **or**
    GNSS is rejected (single rejection triggers degraded state).
 
+No-fix timeout (checked via :meth:`check_timeout`):
+
+6. **NORMAL/DEGRADED → OUTAGE**:
+   Elapsed time since the last GNSS observation exceeds
+   ``no_fix_timeout_s``.  An accepted OR rejected GNSS attempt counts
+   as activity (a measurement was received).  Only absence of a GNSS
+   measurement advances the no-fix timer.
+
 Design notes
 ------------
 * ``q_scale`` returns the per-state process-noise multiplier configured
@@ -81,6 +89,10 @@ class GnssDeficitManager:
         ``"normal"``, ``"degraded"``, ``"outage"``, ``"recovery"``.
         All values must be finite and > 0.  The ``"normal"`` value is
         forced to 1.0 regardless of input.
+    no_fix_timeout_s : float
+        Seconds without any GNSS observation (accepted or rejected)
+        before NORMAL or DEGRADED transitions to OUTAGE via
+        :meth:`check_timeout`.  Must be > 0.
     """
 
     def __init__(
@@ -91,6 +103,7 @@ class GnssDeficitManager:
         accuracy_threshold_m: float,
         outage_min_s: float = 3.0,
         q_scales: Optional[dict] = None,
+        no_fix_timeout_s: float = 5.0,
     ) -> None:
         if nis_window <= 0:
             raise ValueError(f"nis_window must be > 0, got {nis_window}")
@@ -104,6 +117,14 @@ class GnssDeficitManager:
             raise TypeError(f"outage_min_s must be numeric, got {type(outage_min_s)}")
         if outage_min_s < 0:
             raise ValueError(f"outage_min_s must be >= 0, got {outage_min_s}")
+        if not isinstance(no_fix_timeout_s, (int, float)):
+            raise TypeError(
+                f"no_fix_timeout_s must be numeric, got {type(no_fix_timeout_s)}"
+            )
+        if not (no_fix_timeout_s == no_fix_timeout_s):  # NaN check
+            raise ValueError("no_fix_timeout_s must not be NaN")
+        if no_fix_timeout_s <= 0:
+            raise ValueError(f"no_fix_timeout_s must be > 0, got {no_fix_timeout_s}")
         if not (nis_threshold == nis_threshold):  # NaN check
             raise ValueError("nis_threshold must not be NaN")
         if not (accuracy_threshold_m == accuracy_threshold_m):  # NaN check
@@ -113,6 +134,7 @@ class GnssDeficitManager:
         self._nis_threshold = float(nis_threshold)
         self._accuracy_threshold_m = float(accuracy_threshold_m)
         self._outage_min_s = float(outage_min_s)
+        self._no_fix_timeout_s = float(no_fix_timeout_s)
 
         # Sliding-window histories (bounded to nis_window entries).
         self._nis_history: deque[float] = deque(maxlen=self._nis_window)
@@ -125,6 +147,7 @@ class GnssDeficitManager:
         # Timestamps.
         self._state_enter_t: Optional[float] = None
         self._last_update_t: Optional[float] = None
+        self._last_gnss_activity_t: Optional[float] = None
 
         # Initial state.
         self._state = GnssState.NORMAL
@@ -184,6 +207,45 @@ class GnssDeficitManager:
         This does **not** bypass the existing chi-square NIS gate.
         """
         return self._state != GnssState.OUTAGE
+
+    def check_timeout(self, *, t_s: float) -> GnssState:
+        """Check whether the absence of GNSS observations has triggered an outage.
+
+        Call this at every navigation timestamp where no GNSS fix is
+        available.  If the time since the most recent GNSS observation
+        (accepted or rejected) exceeds ``no_fix_timeout_s``, the state
+        transitions from NORMAL or DEGRADED to OUTAGE.
+
+        Parameters
+        ----------
+        t_s : float
+            Current time in seconds.  Must be >= the previous call.
+
+        Returns
+        -------
+        GnssState
+            The (possibly updated) state after this check.
+        """
+        if not isinstance(t_s, (int, float)):
+            raise TypeError(f"t_s must be numeric, got {type(t_s)}")
+        if not (t_s == t_s):  # NaN check
+            raise ValueError("t_s must not be NaN")
+        if self._last_update_t is not None and t_s < self._last_update_t:
+            raise ValueError(
+                f"t_s must be monotonically non-decreasing "
+                f"(got {t_s} < previous {self._last_update_t})"
+            )
+        self._last_update_t = t_s
+
+        if self._last_gnss_activity_t is None:
+            return self._state
+
+        if self._state in (GnssState.NORMAL, GnssState.DEGRADED):
+            elapsed = t_s - self._last_gnss_activity_t
+            if elapsed >= self._no_fix_timeout_s:
+                self._transition(GnssState.OUTAGE, t_s)
+
+        return self._state
 
     def update(
         self,
@@ -265,6 +327,7 @@ class GnssDeficitManager:
             if self._quality_is_poor():
                 self._transition(GnssState.DEGRADED, t_s)
 
+        self._last_gnss_activity_t = t_s
         self._last_update_t = t_s
         return self._state
 

@@ -40,6 +40,7 @@ gnss_deficit:
     degraded: 2.0
     outage: 4.0
     recovery: 1.5
+  no_fix_timeout_s: 5.0     # seconds without any GNSS observation before NORMAL/DEGRADED -> OUTAGE
 
 data:
   manifest_path: "Phase2_Speed_Estimation_SIH26168/phase2_speed_estimation/reports/phase2/dataset_manifest.json"
