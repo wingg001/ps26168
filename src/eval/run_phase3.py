@@ -563,17 +563,21 @@ def run_session(session_id, manifest, config):
         "zupt": 0,
         "cnn": 0,
         "bad_timestamp": 0,
+        "adaptive_q_predictions": 0,
     }
     nis_vals = []
 
-    # Phase 6: GNSS deficit state machine (observation only — no filter changes).
+    # Phase 6: GNSS deficit state machine with adaptive Q scaling.
+    cfg_deficit = config.get("gnss_deficit", {})
     gnss_deficit = GnssDeficitManager(
-        nis_window=10,
-        nis_threshold=5.99,  # chi-square 95% gate for dof=2
-        accuracy_threshold_m=30.0,
-        outage_min_s=3.0,
+        nis_window=int(cfg_deficit.get("nis_window", 10)),
+        nis_threshold=float(cfg_deficit.get("nis_threshold", 5.99)),
+        accuracy_threshold_m=float(cfg_deficit.get("accuracy_threshold_m", 30.0)),
+        outage_min_s=float(cfg_deficit.get("outage_min_s", 3.0)),
+        q_scales=cfg_deficit.get("q_scales"),
     )
     gnss_state_counts = {s.value: 0 for s in GnssState}
+    baseline_Q = ukf.Q.copy()
 
     b_start = float(t_p[0]) + float(config["blackout_start_s"])
     b_end = b_start + float(config["blackout_duration_s"])
@@ -654,7 +658,14 @@ def run_session(session_id, manifest, config):
         ins_state = propagate_ins_state(ins_state, u_k, dt)
         raw_ins_pos.append(ins_state[0:2].copy())
 
+        # Phase 6: apply adaptive Q scaling for the prediction step.
+        _qs = gnss_deficit.q_scale
+        if _qs != 1.0:
+            ukf.Q = baseline_Q * _qs
+            counters["adaptive_q_predictions"] += 1
         ukf.predict(propagate_ins_state, dt, u_k)
+        if _qs != 1.0:
+            ukf.Q = baseline_Q.copy()
 
         # GNSS update outside simulated blackout, applied ONLY to genuinely new
         # (distinct) fixes. Repeated 10 Hz rows carrying the same coordinates are
@@ -781,6 +792,11 @@ def run_session(session_id, manifest, config):
         f"OUTAGE={gnss_state_counts['outage']} | "
         f"RECOVERY={gnss_state_counts['recovery']}"
     )
+    print(
+        f"Adaptive Q: {counters['adaptive_q_predictions']} predictions with "
+        f"Q != baseline (scales: normal=1.0, degraded={gnss_deficit._q_scales['degraded']:.1f}, "
+        f"outage={gnss_deficit._q_scales['outage']:.1f}, recovery={gnss_deficit._q_scales['recovery']:.1f})"
+    )
     # Initialization details (smartphone-only; informational).
     print("--- Initialization (smartphone data only) ---")
     if ukf_initialized:
@@ -869,6 +885,8 @@ def run_session(session_id, manifest, config):
         "gnss_health_outage_epochs": gnss_state_counts["outage"],
         "gnss_health_recovery_epochs": gnss_state_counts["recovery"],
         "gnss_health_final_state": gnss_deficit.state.value,
+        "adaptive_q_predictions": counters["adaptive_q_predictions"],
+        "adaptive_q_scales": dict(gnss_deficit._q_scales),
     }
     pd.DataFrame([metrics]).to_csv(out_dir / f"{session_id}_metrics.csv", index=False)
     with (out_dir / f"{session_id}_metrics.json").open("w", encoding="utf-8") as f:

@@ -221,7 +221,7 @@ class TestDegradedToNormal(unittest.TestCase):
 
 
 class TestQScaleAlwaysOne(unittest.TestCase):
-    """q_scale must remain 1.0 in all states."""
+    """q_scale must be 1.0 in all states when no q_scales are provided."""
 
     def test_q_scale_in_each_state(self):
         m = _default_manager(nis_window=3, outage_min_s=10.0)
@@ -247,6 +247,87 @@ class TestQScaleAlwaysOne(unittest.TestCase):
         _push_good(m, t_s=10.0)
         self.assertEqual(m.state, GnssState.RECOVERY)
         self.assertEqual(m.q_scale, 1.0)
+
+
+class TestQScaleConfigured(unittest.TestCase):
+    """q_scale must return per-state values from q_scales config."""
+
+    def test_q_scale_per_state(self):
+        m = _default_manager(
+            nis_window=3, outage_min_s=10.0,
+            q_scales={"normal": 1.0, "degraded": 2.0, "outage": 4.0, "recovery": 1.5},
+        )
+        self.assertEqual(m.state, GnssState.NORMAL)
+        self.assertEqual(m.q_scale, 1.0)
+
+        # Push to DEGRADED.
+        _push_good(m, t_s=0.0)
+        for i in range(3):
+            _push_bad_reject(m, t_s=float(1 + i))
+        self.assertEqual(m.state, GnssState.DEGRADED)
+        self.assertEqual(m.q_scale, 2.0)
+
+        # Push to OUTAGE.
+        for i in range(3):
+            _push_bad_reject(m, t_s=float(4 + i))
+        self.assertEqual(m.state, GnssState.OUTAGE)
+        self.assertEqual(m.q_scale, 4.0)
+
+        # Push to RECOVERY.
+        _push_good(m, t_s=10.0)
+        self.assertEqual(m.state, GnssState.RECOVERY)
+        self.assertEqual(m.q_scale, 1.5)
+
+    def test_normal_always_one(self):
+        """NORMAL q_scale is forced to 1.0 regardless of config."""
+        m = _default_manager(
+            q_scales={"normal": 5.0, "degraded": 2.0, "outage": 4.0, "recovery": 1.5},
+        )
+        self.assertEqual(m.q_scale, 1.0)
+
+    def test_default_q_scales_all_one(self):
+        """Without q_scales, all states return 1.0."""
+        m = _default_manager()
+        self.assertEqual(m.q_scale, 1.0)
+
+
+class TestQScaleValidation(unittest.TestCase):
+    """q_scales constructor parameter must be validated."""
+
+    def test_missing_key_raises(self):
+        with self.assertRaises(ValueError):
+            GnssDeficitManager(
+                nis_window=5, nis_threshold=6.0, accuracy_threshold_m=30.0,
+                q_scales={"normal": 1.0, "degraded": 2.0},  # missing outage, recovery
+            )
+
+    def test_nan_value_raises(self):
+        with self.assertRaises(ValueError):
+            GnssDeficitManager(
+                nis_window=5, nis_threshold=6.0, accuracy_threshold_m=30.0,
+                q_scales={"normal": 1.0, "degraded": float("nan"), "outage": 4.0, "recovery": 1.5},
+            )
+
+    def test_negative_value_raises(self):
+        with self.assertRaises(ValueError):
+            GnssDeficitManager(
+                nis_window=5, nis_threshold=6.0, accuracy_threshold_m=30.0,
+                q_scales={"normal": 1.0, "degraded": -1.0, "outage": 4.0, "recovery": 1.5},
+            )
+
+    def test_zero_value_raises(self):
+        with self.assertRaises(ValueError):
+            GnssDeficitManager(
+                nis_window=5, nis_threshold=6.0, accuracy_threshold_m=30.0,
+                q_scales={"normal": 1.0, "degraded": 0.0, "outage": 4.0, "recovery": 1.5},
+            )
+
+    def test_non_numeric_value_raises(self):
+        with self.assertRaises(TypeError):
+            GnssDeficitManager(
+                nis_window=5, nis_threshold=6.0, accuracy_threshold_m=30.0,
+                q_scales={"normal": 1.0, "degraded": "bad", "outage": 4.0, "recovery": 1.5},
+            )
 
 
 class TestGnssAllowedBehavior(unittest.TestCase):

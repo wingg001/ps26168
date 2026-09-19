@@ -4,10 +4,6 @@ Tracks GNSS signal health using a sliding window of NIS values and GPS
 accuracy reports.  Exposes a deterministic state machine with four
 states: NORMAL, DEGRADED, OUTAGE, RECOVERY.
 
-This module is intentionally self-contained.  It does **not** modify the
-UKF, process noise, or any existing filter component.  Adaptive-Q
-behaviour and filter integration are later Phase 6 tasks.
-
 State transitions
 -----------------
 
@@ -41,8 +37,8 @@ Transition rules (evaluated in order each :meth:`update` call):
 
 Design notes
 ------------
-* ``q_scale`` always returns 1.0.  Adaptive process-noise scaling is a
-  later Phase 6 task.
+* ``q_scale`` returns the per-state process-noise multiplier configured
+  via the ``q_scales`` parameter.  NORMAL always returns 1.0.
 * ``gnss_allowed`` is ``False`` only in the OUTAGE state.  The existing
   chi-square gate remains the primary per-update acceptance mechanism.
 * All history buffers are bounded to ``nis_window`` entries.
@@ -80,6 +76,11 @@ class GnssDeficitManager:
     outage_min_s : float
         Minimum seconds in DEGRADED before a transition to OUTAGE is
         allowed (even if rejections are sustained).  Must be >= 0.
+    q_scales : dict, optional
+        Per-state process-noise multipliers.  Keys must be
+        ``"normal"``, ``"degraded"``, ``"outage"``, ``"recovery"``.
+        All values must be finite and > 0.  The ``"normal"`` value is
+        forced to 1.0 regardless of input.
     """
 
     def __init__(
@@ -89,6 +90,7 @@ class GnssDeficitManager:
         nis_threshold: float,
         accuracy_threshold_m: float,
         outage_min_s: float = 3.0,
+        q_scales: Optional[dict] = None,
     ) -> None:
         if nis_window <= 0:
             raise ValueError(f"nis_window must be > 0, got {nis_window}")
@@ -127,6 +129,31 @@ class GnssDeficitManager:
         # Initial state.
         self._state = GnssState.NORMAL
 
+        # Per-state Q multipliers.  NORMAL is always forced to 1.0.
+        _default_q = {s.value: 1.0 for s in GnssState}
+        if q_scales is not None:
+            for key in GnssState:
+                if key.value not in q_scales:
+                    raise ValueError(
+                        f"q_scales missing key {key.value!r}; "
+                        f"got keys {sorted(q_scales.keys())}"
+                    )
+                v = q_scales[key.value]
+                if not isinstance(v, (int, float)):
+                    raise TypeError(
+                        f"q_scales[{key.value!r}] must be numeric, got {type(v)}"
+                    )
+                if not (v == v):  # NaN check
+                    raise ValueError(f"q_scales[{key.value!r}] must not be NaN")
+                if v <= 0:
+                    raise ValueError(
+                        f"q_scales[{key.value!r}] must be > 0, got {v}"
+                    )
+                _default_q[key.value] = float(v)
+        # NORMAL is always 1.0 regardless of input.
+        _default_q[GnssState.NORMAL.value] = 1.0
+        self._q_scales: dict[str, float] = _default_q
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -140,10 +167,10 @@ class GnssDeficitManager:
     def q_scale(self) -> float:
         """Process-noise multiplier for the current state.
 
-        Currently always returns ``1.0``.  Adaptive-Q behaviour is a
-        later Phase 6 task.
+        Returns the per-state value configured via ``q_scales``.
+        NORMAL always returns 1.0.
         """
-        return 1.0
+        return self._q_scales[self._state.value]
 
     @property
     def gnss_allowed(self) -> bool:

@@ -30,6 +30,17 @@ ukf:
   cnn:
     time_tolerance_s: 0.15
 
+gnss_deficit:
+  nis_window: 10
+  nis_threshold: 5.99        # chi-square 95% gate for dof=2
+  accuracy_threshold_m: 30.0
+  outage_min_s: 3.0
+  q_scales:                  # per-state process-noise multipliers (NORMAL always 1.0)
+    normal: 1.0
+    degraded: 2.0
+    outage: 4.0
+    recovery: 1.5
+
 data:
   manifest_path: "Phase2_Speed_Estimation_SIH26168/phase2_speed_estimation/reports/phase2/dataset_manifest.json"
   phase2_preds_path: "Phase2_Speed_Estimation_SIH26168/phase2_speed_estimation/reports/phase2/phase2_test_predictions.csv"
