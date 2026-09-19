@@ -4,7 +4,51 @@ Intelligent Dead Reckoning for **SIH 2026 Problem Statement 26168**.
 
 This repository is the **car / IO-VNBD baseline only**. Two-wheeler data collection is deferred.
 
-Phase 0 (this checkout) is setup: layout, config, logging, dataset loading, preprocessing skeleton, and evaluation/visualization skeleton. It does **not** run dead reckoning, UKF, or ML yet, and it does **not** invent accuracy numbers.
+GNSS/INS fusion pipeline for **SIH 2026 Problem Statement 26168**. Fuses smartphone IMU and GNSS via a 15-state UKF with NHC, ZUPT, and CNN speed constraints. Map matching and mobile deployment are planned (see roadmap below).
+
+## Development Roadmap
+
+| Phase | Milestone | Status |
+|-------|-----------|--------|
+| 0 | Project setup, schema inspection | Complete |
+| 1 | Preprocessing, calibration, time alignment | Complete |
+| 2 | CNN speed estimation model | Complete |
+| 3 | INS mechanization / dead reckoning | Complete |
+| 4 | GNSS + INS fusion (UKF) | **Complete** |
+| 5 | Map matching (HMM + road network) | Next |
+| 6 | Seamless GNSS deficit handler | Deferred |
+| 7 | Mobile app (Android) | Deferred |
+| 8 | Edge-deployable engine | Deferred |
+| 9 | Benchmarking & screening submission | Deferred |
+
+## Phase 4: GNSS + INS Fusion
+
+A 15-state Scaled UKF fuses smartphone IMU (10 Hz) with GNSS position fixes. The filter uses strapdown INS mechanization for propagation and applies three constraint types during updates:
+
+- **NHC** (Non-Holonomic Constraint): zero lateral and vertical velocity in the body frame
+- **ZUPT** (Zero-Velocity Update): zero velocity when the vehicle is stationary
+- **CNN speed**: forward velocity from the Phase 2 speed estimation model
+
+GNSS updates are accepted or rejected via chi-square NIS gating (95% confidence). The GNSS noise model uses the phone's own GPS ACCURACY broadcasts (75th percentile over a calibration window, 3.0 m sigma floor) — no reference trajectory data is used at runtime.
+
+Initialization is causal: the filter waits for two consecutive distinct GNSS fixes with >=50 m baseline before starting. This prevents future-data leakage.
+
+**Results** on two IO-VNBD sessions with a synthetic 30 s GNSS blackout:
+
+| Session | Blackout MAE |
+|---------|-------------|
+| S1 (stationary-then-drive) | 156.9 m |
+| VW12 (highway) | 931.4 m |
+
+Constraint ablation on S1 showed substantial degradation when individual constraints were removed (e.g., removing CNN increased blackout MAE from 157 m to 2514 m).
+
+**Known limitations:** heading drift during GNSS-denied propagation remains the dominant error source; no map matching is applied; the pipeline runs offline only.
+
+See `reports/phase4/PHASE4_HANDOFF.md` for the full technical handoff.
+
+## Phase 5: Map Matching (Next)
+
+HMM-based map matching to snap the fused trajectory onto the OSM road network. Emission probabilities from INS/GNSS-to-road distance; transition probabilities from road-network path likelihood. This is the next development milestone.
 
 ## Run Phase 0
 
@@ -80,4 +124,4 @@ Author scripts index vehicle lat/lon at columns 2 and 3 (0-based). Some scripts 
 
 ## Later phases
 
-Follow `Downloads/PS26168_Execution_Roadmap.md`. Do not start Phase 1 until this Phase 0 command completes without errors.
+See the Development Roadmap table above. Detailed execution plan in `Downloads/PS26168_Execution_Roadmap.md`.
