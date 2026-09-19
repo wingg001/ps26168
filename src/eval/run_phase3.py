@@ -564,6 +564,9 @@ def run_session(session_id, manifest, config):
         "cnn": 0,
         "bad_timestamp": 0,
         "adaptive_q_predictions": 0,
+        "recovery_probes_attempted": 0,
+        "recovery_fixes_accepted": 0,
+        "recovery_fixes_rejected": 0,
     }
     nis_vals = []
 
@@ -674,8 +677,13 @@ def run_session(session_id, manifest, config):
         success = False
         accepted = False
         nis = float("nan")
+        is_recovery_probe = False
         if not in_blackout_k and gnss_distinct[k]:
             gnss_attempted = True
+            # Track recovery probes: GNSS attempts while manager is in OUTAGE.
+            if gnss_deficit.state == GnssState.OUTAGE:
+                is_recovery_probe = True
+                counters["recovery_probes_attempted"] += 1
             enu_meas = ltp.to_enu(gnss_raw[k, 0], gnss_raw[k, 1])[0:2]
             gnss_plot_pos.append((float(enu_meas[0]), float(enu_meas[1]), float(t_p[k] - t_p[0])))
             counters["gnss_events_attempted"] += 1
@@ -697,8 +705,12 @@ def run_session(session_id, manifest, config):
                 nis_vals.append(float(nis))
             if success and accepted:
                 counters["gnss_accept"] += 1
+                if is_recovery_probe:
+                    counters["recovery_fixes_accepted"] += 1
             elif np.isfinite(nis):
                 counters["gnss_reject"] += 1
+                if is_recovery_probe:
+                    counters["recovery_fixes_rejected"] += 1
             else:
                 counters["gnss_numerical_fail"] += 1
 
@@ -797,6 +809,11 @@ def run_session(session_id, manifest, config):
         f"Q != baseline (scales: normal=1.0, degraded={gnss_deficit._q_scales['degraded']:.1f}, "
         f"outage={gnss_deficit._q_scales['outage']:.1f}, recovery={gnss_deficit._q_scales['recovery']:.1f})"
     )
+    print(
+        f"Recovery Probes: {counters['recovery_probes_attempted']} attempted | "
+        f"{counters['recovery_fixes_accepted']} accepted | "
+        f"{counters['recovery_fixes_rejected']} rejected"
+    )
     # Initialization details (smartphone-only; informational).
     print("--- Initialization (smartphone data only) ---")
     if ukf_initialized:
@@ -887,6 +904,9 @@ def run_session(session_id, manifest, config):
         "gnss_health_final_state": gnss_deficit.state.value,
         "adaptive_q_predictions": counters["adaptive_q_predictions"],
         "adaptive_q_scales": dict(gnss_deficit._q_scales),
+        "recovery_probes_attempted": counters["recovery_probes_attempted"],
+        "recovery_fixes_accepted": counters["recovery_fixes_accepted"],
+        "recovery_fixes_rejected": counters["recovery_fixes_rejected"],
     }
     pd.DataFrame([metrics]).to_csv(out_dir / f"{session_id}_metrics.csv", index=False)
     with (out_dir / f"{session_id}_metrics.json").open("w", encoding="utf-8") as f:

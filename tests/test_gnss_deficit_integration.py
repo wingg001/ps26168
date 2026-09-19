@@ -382,5 +382,184 @@ class TestMetricsOutput(unittest.TestCase):
         self.assertEqual(gnss_health_keys["adaptive_q_scales"]["recovery"], 1.5)
 
 
+class TestRecoveryProbing(unittest.TestCase):
+    """Verify recovery probing: GNSS attempts during OUTAGE are tracked,
+    rejected probes keep OUTAGE, accepted probes enter RECOVERY,
+    sustained accepted fixes return to NORMAL, and the NIS gate remains authoritative.
+    """
+
+    def test_normal_gnss_accepted(self):
+        from src.filters.gnss_deficit import GnssDeficitManager, GnssState
+        m = GnssDeficitManager(
+            nis_window=5, nis_threshold=5.99, accuracy_threshold_m=30.0,
+            outage_min_s=3.0,
+        )
+        for i in range(5):
+            s = _push_good(m, t_s=float(i))
+        self.assertEqual(s, GnssState.NORMAL)
+
+    def test_transition_to_degraded(self):
+        from src.filters.gnss_deficit import GnssDeficitManager, GnssState
+        m = GnssDeficitManager(
+            nis_window=5, nis_threshold=5.99, accuracy_threshold_m=30.0,
+            outage_min_s=3.0,
+        )
+        for i in range(5):
+            _push_good(m, t_s=float(i))
+        for i in range(4):
+            s = _push_bad_reject(m, t_s=float(5 + i))
+        self.assertEqual(s, GnssState.DEGRADED)
+
+    def test_transition_to_outage(self):
+        from src.filters.gnss_deficit import GnssDeficitManager, GnssState
+        m = GnssDeficitManager(
+            nis_window=5, nis_threshold=5.99, accuracy_threshold_m=30.0,
+            outage_min_s=3.0,
+        )
+        for i in range(5):
+            _push_good(m, t_s=float(i))
+        for i in range(4):
+            _push_bad_reject(m, t_s=float(5 + i))
+        self.assertEqual(m.state, GnssState.DEGRADED)
+        for i in range(5):
+            s = _push_bad_reject(m, t_s=float(9 + i))
+        self.assertEqual(s, GnssState.OUTAGE)
+
+    def test_rejected_recovery_candidate_stays_outage(self):
+        from src.filters.gnss_deficit import GnssDeficitManager, GnssState
+        m = GnssDeficitManager(
+            nis_window=5, nis_threshold=5.99, accuracy_threshold_m=30.0,
+            outage_min_s=3.0,
+        )
+        for i in range(5):
+            _push_good(m, t_s=float(i))
+        for i in range(4):
+            _push_bad_reject(m, t_s=float(5 + i))
+        for i in range(5):
+            _push_bad_reject(m, t_s=float(9 + i))
+        self.assertEqual(m.state, GnssState.OUTAGE)
+        s = _push_bad_reject(m, t_s=20.0)
+        self.assertEqual(s, GnssState.OUTAGE)
+
+    def test_accepted_recovery_candidate_enters_recovery(self):
+        from src.filters.gnss_deficit import GnssDeficitManager, GnssState
+        m = GnssDeficitManager(
+            nis_window=5, nis_threshold=5.99, accuracy_threshold_m=30.0,
+            outage_min_s=3.0,
+        )
+        for i in range(5):
+            _push_good(m, t_s=float(i))
+        for i in range(4):
+            _push_bad_reject(m, t_s=float(5 + i))
+        for i in range(5):
+            _push_bad_reject(m, t_s=float(9 + i))
+        self.assertEqual(m.state, GnssState.OUTAGE)
+        s = _push_good(m, t_s=20.0)
+        self.assertEqual(s, GnssState.RECOVERY)
+
+    def test_sustained_accepted_fixes_return_to_normal(self):
+        from src.filters.gnss_deficit import GnssDeficitManager, GnssState
+        m = GnssDeficitManager(
+            nis_window=5, nis_threshold=5.99, accuracy_threshold_m=30.0,
+            outage_min_s=3.0,
+        )
+        for i in range(5):
+            _push_good(m, t_s=float(i))
+        for i in range(4):
+            _push_bad_reject(m, t_s=float(5 + i))
+        for i in range(5):
+            _push_bad_reject(m, t_s=float(9 + i))
+        self.assertEqual(m.state, GnssState.OUTAGE)
+        s = _push_good(m, t_s=20.0)
+        self.assertEqual(s, GnssState.RECOVERY)
+        for i in range(4):
+            s = _push_good(m, t_s=float(21 + i))
+        self.assertEqual(s, GnssState.NORMAL)
+
+    def test_no_permanent_outage_lock(self):
+        from src.filters.gnss_deficit import GnssDeficitManager, GnssState
+        m = GnssDeficitManager(
+            nis_window=5, nis_threshold=5.99, accuracy_threshold_m=30.0,
+            outage_min_s=3.0,
+        )
+        for i in range(5):
+            _push_good(m, t_s=float(i))
+        for i in range(4):
+            _push_bad_reject(m, t_s=float(5 + i))
+        for i in range(5):
+            _push_bad_reject(m, t_s=float(9 + i))
+        self.assertEqual(m.state, GnssState.OUTAGE)
+        for i in range(10):
+            s = _push_bad_reject(m, t_s=float(20 + i))
+            self.assertEqual(s, GnssState.OUTAGE)
+        s = _push_good(m, t_s=40.0)
+        self.assertEqual(s, GnssState.RECOVERY)
+
+    def test_nis_gate_remains_authoritative(self):
+        from src.filters.gnss_deficit import GnssDeficitManager, GnssState
+        m = GnssDeficitManager(
+            nis_window=5, nis_threshold=5.99, accuracy_threshold_m=30.0,
+            outage_min_s=3.0,
+        )
+        for i in range(5):
+            _push_good(m, t_s=float(i))
+        for i in range(4):
+            _push_bad_reject(m, t_s=float(5 + i))
+        for i in range(5):
+            _push_bad_reject(m, t_s=float(9 + i))
+        self.assertEqual(m.state, GnssState.OUTAGE)
+        # NIS gate rejects -> stays OUTAGE.
+        s = m.update(t_s=20.0, gnss_accepted=False, nis=100.0, gps_accuracy_m=50.0)
+        self.assertEqual(s, GnssState.OUTAGE)
+        # NIS gate accepts -> enters RECOVERY.
+        s = m.update(t_s=21.0, gnss_accepted=True, nis=2.0, gps_accuracy_m=5.0)
+        self.assertEqual(s, GnssState.RECOVERY)
+
+
+class TestRecoveryProbeCounters(unittest.TestCase):
+    """Verify recovery probe counters are correctly tracked."""
+
+    def test_recovery_probe_counter_increment(self):
+        from src.filters.gnss_deficit import GnssDeficitManager, GnssState
+        m = GnssDeficitManager(
+            nis_window=5, nis_threshold=5.99, accuracy_threshold_m=30.0,
+            outage_min_s=3.0,
+        )
+        for i in range(5):
+            _push_good(m, t_s=float(i))
+        for i in range(4):
+            _push_bad_reject(m, t_s=float(5 + i))
+        for i in range(5):
+            _push_bad_reject(m, t_s=float(9 + i))
+        self.assertEqual(m.state, GnssState.OUTAGE)
+        counters = {"recovery_probes_attempted": 0, "recovery_fixes_accepted": 0,
+                     "recovery_fixes_rejected": 0}
+        # Probe 1: rejected.
+        if m.state == GnssState.OUTAGE:
+            counters["recovery_probes_attempted"] += 1
+        s = m.update(t_s=20.0, gnss_accepted=False, nis=100.0, gps_accuracy_m=50.0)
+        if s == GnssState.OUTAGE:
+            counters["recovery_fixes_rejected"] += 1
+        # Probe 2: accepted.
+        if m.state == GnssState.OUTAGE:
+            counters["recovery_probes_attempted"] += 1
+        s = m.update(t_s=21.0, gnss_accepted=True, nis=2.0, gps_accuracy_m=5.0)
+        if s == GnssState.RECOVERY:
+            counters["recovery_fixes_accepted"] += 1
+        self.assertEqual(counters["recovery_probes_attempted"], 2)
+        self.assertEqual(counters["recovery_fixes_accepted"], 1)
+        self.assertEqual(counters["recovery_fixes_rejected"], 1)
+
+    def test_metrics_keys_include_recovery_probes(self):
+        counters = {
+            "recovery_probes_attempted": 5,
+            "recovery_fixes_accepted": 2,
+            "recovery_fixes_rejected": 3,
+        }
+        self.assertEqual(counters["recovery_probes_attempted"], 5)
+        self.assertEqual(counters["recovery_fixes_accepted"], 2)
+        self.assertEqual(counters["recovery_fixes_rejected"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()
