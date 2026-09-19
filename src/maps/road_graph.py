@@ -8,12 +8,77 @@ Typical usage
 -------------
 >>> G = build_road_graph(lat_bounds=(51.40, 51.55), lon_bounds=(-0.30, -0.10))
 >>> len(G.nodes), len(G.edges)  # doctest: +SKIP
+>>> edges, dists = find_nearest_edges(G, X=-0.15, Y=51.47, return_distance=True)  # doctest: +SKIP
 """
 
 from __future__ import annotations
 
+from typing import Sequence, Union
+
 import networkx as nx
+import numpy as np
+import numpy.typing as npt
 import osmnx as ox
+
+
+def find_nearest_edges(
+    graph: nx.MultiDiGraph,
+    X: Union[float, Sequence[float], npt.NDArray[np.floating]],
+    Y: Union[float, Sequence[float], npt.NDArray[np.floating]],
+    *,
+    return_distance: bool = False,
+) -> Union[
+    tuple[int, int, int],
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.int64], npt.NDArray[np.int64]],
+    tuple[tuple[int, int, int], float],
+    tuple[npt.NDArray[np.int64], npt.NDArray[np.int64], npt.NDArray[np.int64], npt.NDArray[np.float64]],
+]:
+    """Find the nearest road-graph edge to each coordinate pair.
+
+    Thin wrapper around :func:`osmnx.distance.nearest_edges` that
+    normalises scalar and array inputs into a consistent return type.
+
+    Parameters
+    ----------
+    graph : networkx.MultiDiGraph
+        Road graph (e.g. from :func:`build_road_graph`).
+    X : float or array-like
+        Longitude(s) of the query point(s).  Accepts a single float,
+        a Python sequence, or a NumPy array.
+    Y : float or array-like
+        Latitude(s) of the query point(s).  Same shape rules as *X*.
+    return_distance : bool, optional
+        If *True*, also return the Euclidean distance(s) from each
+        query point to its nearest edge (in the same units as the
+        graph CRS — typically metres for a projected graph, or
+        approximate degrees for a raw WGS-84 graph).
+
+    Returns
+    -------
+    edges : tuple of arrays or single tuple
+        For a single point, ``(u, v, k)`` — the nearest edge ID.
+        For multiple points, three NumPy arrays ``(us, vs, ks)`` each
+        of length *N*.
+    distances : numpy.ndarray, optional
+        Only returned when ``return_distance=True``.  A float64 array
+        of per-point distances.
+
+    Notes
+    -----
+    * The function passes ``X=longitude`` and ``Y=latitude`` to OSMnx,
+      matching its coordinate convention.
+    * No input coordinates are modified or snapped.
+    """
+    # Ensure numpy arrays for consistent downstream handling
+    X_arr = np.atleast_1d(np.asarray(X, dtype=np.float64))
+    Y_arr = np.atleast_1d(np.asarray(Y, dtype=np.float64))
+
+    ne, dist = ox.distance.nearest_edges(graph, X_arr, Y_arr, return_dist=True)
+
+    if return_distance:
+        return ne, dist
+    else:
+        return ne
 
 
 def build_road_graph(
