@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
+from src.filters.gnss_deficit import GnssDeficitManager, GnssState
+
 # Ensure project root is in path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -564,6 +566,15 @@ def run_session(session_id, manifest, config):
     }
     nis_vals = []
 
+    # Phase 6: GNSS deficit state machine (observation only — no filter changes).
+    gnss_deficit = GnssDeficitManager(
+        nis_window=10,
+        nis_threshold=5.99,  # chi-square 95% gate for dof=2
+        accuracy_threshold_m=30.0,
+        outage_min_s=3.0,
+    )
+    gnss_state_counts = {s.value: 0 for s in GnssState}
+
     b_start = float(t_p[0]) + float(config["blackout_start_s"])
     b_end = b_start + float(config["blackout_duration_s"])
 
@@ -648,7 +659,12 @@ def run_session(session_id, manifest, config):
         # GNSS update outside simulated blackout, applied ONLY to genuinely new
         # (distinct) fixes. Repeated 10 Hz rows carrying the same coordinates are
         # not independent measurements and never generate a second update.
+        gnss_attempted = False
+        success = False
+        accepted = False
+        nis = float("nan")
         if not in_blackout_k and gnss_distinct[k]:
+            gnss_attempted = True
             enu_meas = ltp.to_enu(gnss_raw[k, 0], gnss_raw[k, 1])[0:2]
             gnss_plot_pos.append((float(enu_meas[0]), float(enu_meas[1]), float(t_p[k] - t_p[0])))
             counters["gnss_events_attempted"] += 1
@@ -674,6 +690,15 @@ def run_session(session_id, manifest, config):
                 counters["gnss_reject"] += 1
             else:
                 counters["gnss_numerical_fail"] += 1
+
+        # Phase 6: feed the GNSS deficit manager (observation only).
+        gnss_deficit.update(
+            t_s=float(t_p[k] - t_p[0]),
+            gnss_accepted=bool(success and accepted),
+            nis=float(nis),
+            gps_accuracy_m=float(gnss_acc[k]) if np.isfinite(gnss_acc[k]) else float("nan"),
+        )
+        gnss_state_counts[gnss_deficit.state.value] += 1
 
         # ZUPT / NHC / CNN.
         if k >= 10:
@@ -750,6 +775,12 @@ def run_session(session_id, manifest, config):
     )
     print(f"Bad timestamp gaps: {counters['bad_timestamp']}")
     print(f"ZUPT enabled: {zupt_enabled}")
+    print(
+        f"GNSS Health: NORMAL={gnss_state_counts['normal']} | "
+        f"DEGRADED={gnss_state_counts['degraded']} | "
+        f"OUTAGE={gnss_state_counts['outage']} | "
+        f"RECOVERY={gnss_state_counts['recovery']}"
+    )
     # Initialization details (smartphone-only; informational).
     print("--- Initialization (smartphone data only) ---")
     if ukf_initialized:
@@ -833,6 +864,11 @@ def run_session(session_id, manifest, config):
         "init_bias_source": bias_est["bias_source"],
         "init_accel_bias_veh_xyz_mps2": [float(v) for v in bias_est["accel_bias_veh"]],
         "init_gyro_bias_veh_xyz_radps": [float(v) for v in bias_est["gyro_bias_veh"]],
+        "gnss_health_normal_epochs": gnss_state_counts["normal"],
+        "gnss_health_degraded_epochs": gnss_state_counts["degraded"],
+        "gnss_health_outage_epochs": gnss_state_counts["outage"],
+        "gnss_health_recovery_epochs": gnss_state_counts["recovery"],
+        "gnss_health_final_state": gnss_deficit.state.value,
     }
     pd.DataFrame([metrics]).to_csv(out_dir / f"{session_id}_metrics.csv", index=False)
     with (out_dir / f"{session_id}_metrics.json").open("w", encoding="utf-8") as f:

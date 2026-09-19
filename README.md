@@ -16,7 +16,7 @@ GNSS/INS fusion pipeline for **SIH 2026 Problem Statement 26168**. Fuses smartph
 | 3 | INS mechanization / dead reckoning | Complete |
 | 4 | GNSS + INS fusion (UKF) | **Complete** |
 | 5 | Map matching (HMM + road network) | **Complete** |
-| 6 | Seamless GNSS deficit handler | Deferred |
+| 6 | GNSS deficit handling | **Observation/health tracking complete; adaptive handling pending** |
 | 7 | Mobile app (Android) | Deferred |
 | 8 | Edge-deployable engine | Deferred |
 | 9 | Benchmarking & screening submission | Deferred |
@@ -71,6 +71,25 @@ HMM/Viterbi trajectory-level map matching that snaps phone-GNSS trajectory point
 The HMM trades some per-point proximity for trajectory/network consistency — its max snap distance is 30 m versus 71 m for nearest-edge. 10 points (leading, gap, and trailing) are left unmatched. No reference/V trajectory data is used as estimator input. Offline ground-truth accuracy evaluation is separate.
 
 See `reports/phase5/PHASE5_HANDOFF.md` for the full technical handoff.
+
+## Phase 6: GNSS Deficit Handling — Observation/Health Tracking Complete
+
+A deterministic GNSS health-state tracker monitors signal quality in real time using a sliding window of NIS values and GPS accuracy reports. The state machine has four states: NORMAL → DEGRADED → OUTAGE → RECOVERY → NORMAL.
+
+**Completed:**
+- GNSS NORMAL/DEGRADED/OUTAGE/RECOVERY state tracking
+- Observation-only integration into the navigation runner
+- GNSS health state reporting (summary + metrics JSON/CSV)
+- No change to existing UKF/GNSS estimator behavior
+- 139/139 tests passing
+
+**Remaining Phase 6 work:**
+- Adaptive process-noise handling (Q scaling based on health state)
+- Actual deficit-mode behavior (GNSS blocking during OUTAGE)
+- GNSS re-acquisition handling (RECOVERY → NORMAL transition logic)
+- Map-matching aiding during GNSS deficit
+
+See `reports/phase6/PHASE6_HANDOFF.md` for the full technical handoff.
 
 ## Run Phase 0
 

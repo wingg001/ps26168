@@ -53,5 +53,10 @@
     -0.0019484550480521052,
     0.0004740797725682755,
     -0.0007605861522282011
-  ]
+  ],
+  "gnss_health_normal_epochs": 0,
+  "gnss_health_degraded_epochs": 0,
+  "gnss_health_outage_epochs": 0,
+  "gnss_health_recovery_epochs": 0,
+  "gnss_health_final_state": "normal"
 }

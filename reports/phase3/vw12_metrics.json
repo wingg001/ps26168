@@ -53,5 +53,10 @@
     0.0,
     0.0,
     0.0
-  ]
+  ],
+  "gnss_health_normal_epochs": 181,
+  "gnss_health_degraded_epochs": 10,
+  "gnss_health_outage_epochs": 589,
+  "gnss_health_recovery_epochs": 0,
+  "gnss_health_final_state": "outage"
 }
