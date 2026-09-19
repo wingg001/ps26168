@@ -105,11 +105,8 @@ def match_trajectory_nearest(
     # find_nearest_edges expects X=longitude, Y=latitude
     ne, dist = find_nearest_edges(graph, lon_flat, lat_flat, return_distance=True)
 
-    # ne may be a tuple of 3 arrays (us, vs, ks) or a single (u,v,k) tuple
-    if isinstance(ne, tuple) and len(ne) == 3:
-        edges = np.column_stack([np.asarray(a) for a in ne])
-    else:
-        edges = np.array([ne], dtype=np.int64)
+    # OSMnx returns ndarray[N] dtype=object, each element a (u, v, k) tuple
+    edges = np.array(list(ne), dtype=np.int64)
 
     if return_distance:
         dist_arr = np.asarray(dist, dtype=np.float64).ravel()

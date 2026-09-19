@@ -29,17 +29,19 @@ def _make_mock_graph() -> nx.MultiDiGraph:
 
 
 def _mock_ne_single(graph, lon, lat, **kwargs):
-    """Helper: mock return for a single-point query."""
-    return ((1, 2, 0), np.array([0.003]))
+    """Helper: mock return for a single-point query (real OSMnx shape)."""
+    ne = np.empty(1, dtype=object)
+    ne[0] = (1, 2, 0)
+    return (ne, np.array([0.003]))
 
 
 def _mock_ne_multi(graph, lon, lat, **kwargs):
-    """Helper: mock return for a two-point query."""
+    """Helper: mock return for a two-point query (real OSMnx shape)."""
     n = len(lon)
-    return (
-        (np.array([1] * n), np.array([2] * n), np.array([0] * n)),
-        np.array([0.003, 0.005])[:n],
-    )
+    ne = np.empty(n, dtype=object)
+    for i in range(n):
+        ne[i] = (1, 2, 0)
+    return (ne, np.array([0.003, 0.005])[:n])
 
 
 class TestMatchTrajectoryNearest(unittest.TestCase):

@@ -104,30 +104,37 @@ class TestFindNearestEdges(unittest.TestCase):
 
     @patch("src.maps.road_graph.ox.distance.nearest_edges")
     def test_single_point_returns_edge(self, mock_ne):
-        """A single coordinate pair must return a (u, v, k) edge tuple."""
-        mock_ne.return_value = ((1, 2, 0), np.array([0.003]))
+        """A single coordinate pair must return the OSMnx edge result."""
+        ne = np.empty(1, dtype=object)
+        ne[0] = (1, 2, 0)
+        mock_ne.return_value = (ne, np.array([0.003]))
         graph = _make_mock_graph()
         result = find_nearest_edges(graph, -0.175, 51.475)
-        self.assertEqual(result, (1, 2, 0))
+        # Real OSMnx returns ndarray shape (N,) dtype=object
+        self.assertEqual(result.shape, (1,))
+        self.assertEqual(result.dtype, object)
+        self.assertEqual(tuple(result[0]), (1, 2, 0))
 
     @patch("src.maps.road_graph.ox.distance.nearest_edges")
     def test_multiple_coordinates(self, mock_ne):
         """Arrays of coordinates must be handled without error."""
-        mock_ne.return_value = (
-            (np.array([1, 3]), np.array([2, 4]), np.array([0, 0])),
-            np.array([0.003, 0.005]),
-        )
+        ne = np.empty(2, dtype=object)
+        ne[0] = (1, 2, 0)
+        ne[1] = (3, 4, 0)
+        mock_ne.return_value = (ne, np.array([0.003, 0.005]))
         graph = _make_mock_graph()
         xs = np.array([-0.175, -0.175])
         ys = np.array([51.475, 51.475])
         edges, dists = find_nearest_edges(graph, xs, ys, return_distance=True)
-        self.assertEqual(len(edges[0]), 2)
-        self.assertEqual(len(dists), 2)
+        self.assertEqual(edges.shape, (2,))
+        self.assertEqual(dists.shape, (2,))
 
     @patch("src.maps.road_graph.ox.distance.nearest_edges")
     def test_longitude_passed_as_X(self, mock_ne):
         """The first coordinate argument must be passed as X (longitude)."""
-        mock_ne.return_value = ((1, 2, 0), np.array([0.0]))
+        ne = np.empty(1, dtype=object)
+        ne[0] = (1, 2, 0)
+        mock_ne.return_value = (ne, np.array([0.0]))
         graph = _make_mock_graph()
         find_nearest_edges(graph, -0.175, 51.475)
         args, kwargs = mock_ne.call_args
@@ -137,7 +144,9 @@ class TestFindNearestEdges(unittest.TestCase):
     @patch("src.maps.road_graph.ox.distance.nearest_edges")
     def test_latitude_passed_as_Y(self, mock_ne):
         """The second coordinate argument must be passed as Y (latitude)."""
-        mock_ne.return_value = ((1, 2, 0), np.array([0.0]))
+        ne = np.empty(1, dtype=object)
+        ne[0] = (1, 2, 0)
+        mock_ne.return_value = (ne, np.array([0.0]))
         graph = _make_mock_graph()
         find_nearest_edges(graph, -0.175, 51.475)
         args, kwargs = mock_ne.call_args
@@ -146,11 +155,11 @@ class TestFindNearestEdges(unittest.TestCase):
     @patch("src.maps.road_graph.ox.distance.nearest_edges")
     def test_distance_returned_when_requested(self, mock_ne):
         """With return_distance=True the distance array must be returned."""
+        ne = np.empty(2, dtype=object)
+        ne[0] = (1, 2, 0)
+        ne[1] = (3, 4, 0)
         dist_array = np.array([0.003, 0.007])
-        mock_ne.return_value = (
-            (np.array([1, 3]), np.array([2, 4]), np.array([0, 0])),
-            dist_array,
-        )
+        mock_ne.return_value = (ne, dist_array)
         graph = _make_mock_graph()
         edges, dists = find_nearest_edges(
             graph, [-0.175, -0.180], [51.475, 51.480], return_distance=True
@@ -160,35 +169,34 @@ class TestFindNearestEdges(unittest.TestCase):
     @patch("src.maps.road_graph.ox.distance.nearest_edges")
     def test_return_distance_false_omits_dist(self, mock_ne):
         """With return_distance=False only the edge IDs are returned."""
-        mock_ne.return_value = (
-            (np.array([1]), np.array([2]), np.array([0])),
-            np.array([0.003]),
-        )
+        ne = np.empty(1, dtype=object)
+        ne[0] = (1, 2, 0)
+        mock_ne.return_value = (ne, np.array([0.003]))
         graph = _make_mock_graph()
         result = find_nearest_edges(graph, [-0.175], [51.475], return_distance=False)
-        # result should be the edge tuple directly (no distance array)
-        self.assertEqual(len(result), 3)  # (us, vs, ks)
-        self.assertIsInstance(result[0], np.ndarray)
+        # result should be the edge ndarray directly (no distance array)
+        self.assertEqual(result.shape, (1,))
+        self.assertEqual(result.dtype, object)
+        self.assertEqual(tuple(result[0]), (1, 2, 0))
 
     @patch("src.maps.road_graph.ox.distance.nearest_edges")
     def test_empty_input_handled(self, mock_ne):
         """Empty coordinate arrays must be handled without raising."""
-        mock_ne.return_value = (
-            (np.array([], dtype=np.int64), np.array([], dtype=np.int64),
-             np.array([], dtype=np.int64)),
-            np.array([], dtype=np.float64),
-        )
+        ne = np.empty(0, dtype=object)
+        mock_ne.return_value = (ne, np.array([], dtype=np.float64))
         graph = _make_mock_graph()
         edges, dists = find_nearest_edges(
             graph, np.array([]), np.array([]), return_distance=True
         )
-        self.assertEqual(len(edges[0]), 0)
-        self.assertEqual(len(dists), 0)
+        self.assertEqual(edges.shape, (0,))
+        self.assertEqual(dists.shape, (0,))
 
     @patch("src.maps.road_graph.ox.distance.nearest_edges")
     def test_scalar_input_wrapped_as_array(self, mock_ne):
         """Scalar float inputs must be wrapped into arrays for OSMnx."""
-        mock_ne.return_value = ((1, 2, 0), np.array([0.0]))
+        ne = np.empty(1, dtype=object)
+        ne[0] = (1, 2, 0)
+        mock_ne.return_value = (ne, np.array([0.0]))
         graph = _make_mock_graph()
         find_nearest_edges(graph, -0.175, 51.475)
         args, _ = mock_ne.call_args
