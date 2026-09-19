@@ -58,5 +58,12 @@
   "gnss_health_degraded_epochs": 0,
   "gnss_health_outage_epochs": 0,
   "gnss_health_recovery_epochs": 0,
-  "gnss_health_final_state": "normal"
+  "gnss_health_final_state": "normal",
+  "adaptive_q_predictions": 0,
+  "adaptive_q_scales": {
+    "normal": 1.0,
+    "degraded": 2.0,
+    "outage": 4.0,
+    "recovery": 1.5
+  }
 }
