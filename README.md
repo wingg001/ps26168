@@ -55,14 +55,14 @@ When GNSS drops out, a dead-reckoning system must take over. The challenge is do
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      SENSOR INPUTS                                  │
-│                                                                     │
+┌────────────────────────────────────────────────────────────────────┐
+│                      SENSOR INPUTS                                 │
+│                                                                    │
 │   Smartphone IMU (10 Hz)              GNSS fixes (~1 Hz)           │
 │   ├── Accelerometer (ax, ay, az)      ├── Lat / Lon                │
 │   └── Gyroscope (wx, wy, wz)          └── GPS Accuracy (m)         │
-│                                                                     │
-│   CNN Speed Model (Phase 2)                                       │
+│                                                                    │
+│   CNN Speed Model (Phase 2)                                        │
 │   └── Forward velocity estimate                                    │
 └──────────────┬──────────────────────────────┬──────────────────────┘
                │                              │
@@ -86,11 +86,11 @@ When GNSS drops out, a dead-reckoning system must take over. The challenge is do
                │    │                         │
                ▼    ▼                         ▼
 ┌──────────────────────────────────────────────────────────┐
-│                    UKF UPDATE                             │
+│                    UKF UPDATE                            │
 │                                                          │
 │   GNSS measurements ──────────────────► Chi-square gate  │
 │   NHC (zero lateral/vert velocity) ──►  (NIS 95%)        │
-│   ZUPT (zero velocity when stopped) ──►                 │
+│   ZUPT (zero velocity when stopped) ──►                  │
 │   CNN speed constraint ────────────────►                 │
 │                                                          │
 └──────────────────────┬───────────────────────────────────┘
@@ -110,14 +110,14 @@ When GNSS drops out, a dead-reckoning system must take over. The challenge is do
               └─────────────────┘
 
 ┌──────────────────────────────────────────────────────────┐
-│              GNSS HEALTH MONITOR (Phase 6)                │
+│              GNSS HEALTH MONITOR (Phase 6)               │
 │                                                          │
 │   Observes NIS, GPS accuracy, acceptance history         │
 │   States: NORMAL ──► DEGRADED ──► OUTAGE ──► RECOVERY    │
 │                                                │         │
 │   No-fix timeout (5.0s) ──► OUTAGE             │         │
 │   Recovery probe ──────────────────────────────┘         │
-│   Adaptive Q: 1.0 / 2.0 / 4.0 / 1.5                    │
+│   Adaptive Q: 1.0 / 2.0 / 4.0 / 1.5                      │
 │   NIS gate remains authoritative                         │
 └──────────────────────────────────────────────────────────┘
 ```
