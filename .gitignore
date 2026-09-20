@@ -18,3 +18,4 @@ data/fixtures/*.csv
 !data/processed/.gitkeep
 !data/maps/.gitkeep
 .env
+Phase2_Speed_Estimation_SIH26168/
