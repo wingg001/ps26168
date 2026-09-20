@@ -412,3 +412,51 @@ Expected: `183 passed`
 - **Map matching is offline** — Phase 5 map matching is a post-processing capability, not real-time
 - **No mobile deployment** — Phase 7 (Android real-time) is not yet implemented
 - **No large-scale validation** — tested on two IO-VNBD sessions; broader validation is future work
+
+---
+
+## Potential Deployment & Business Use Cases
+
+The current implementation is a **car / IO-VNBD validated baseline**.
+Its potential deployment areas include:
+
+| Use Case | Potential Value | Current Validation |
+|---|---|---|
+| **Logistics and commercial fleets** | Maintain vehicle position through tunnels, parking structures, and other GNSS-denied areas | Car / IO-VNBD |
+| **Ride-hailing vehicles** | Reduce navigation disruption during short GNSS outages | Car / IO-VNBD |
+| **Emergency response vehicles** | Maintain a navigation estimate where GNSS becomes unreliable | Research / future validation |
+| **Quick-commerce and last-mile delivery** | Support continuous navigation in urban GNSS-denied environments | Future validation |
+| **Two-wheelers / delivery riders** | Extend the same smartphone-only approach to motorcycles and scooters | **Not yet validated** |
+
+### Deployment Model
+
+The system is designed around a **smartphone-first navigation pipeline**:
+the phone provides IMU and GNSS measurements, while the navigation stack
+performs inertial propagation, GNSS/INS fusion, GNSS-deficit handling, and
+road-network map matching.
+
+Potential deployment models include:
+
+- **Fleet integration:** navigation capability embedded into an existing
+  fleet/mobile workflow
+- **Mobile application:** standalone smartphone navigation for drivers
+- **SDK / engine:** reusable navigation component for logistics, mobility,
+  or emergency-response applications
+
+These are **potential deployment models**, not currently shipped products.
+
+### Current Evidence vs. Future Expansion
+
+> The current technical evaluation is based on **car / IO-VNBD data**.
+> Two-wheeler operation is a future validation target because the supplied
+> dataset does not provide the two-wheeler data required to validate
+> motorcycle/scooter-specific behavior. No two-wheeler performance claim is
+> made in this repository.
+
+### Why the Approach Can Generalize
+
+> The core navigation architecture is vehicle-agnostic at the algorithmic
+> level: smartphone IMU measurements, GNSS observations, state estimation,
+> GNSS health handling, and road-network constraints form the common
+> pipeline. Vehicle-specific mounting, motion characteristics, sensor
+> orientation, and calibration still require separate validation.
