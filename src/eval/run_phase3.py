@@ -228,7 +228,16 @@ def compute_initialization(
     }
 
 
-def run_session(session_id, manifest, config):
+def run_session(
+    session_id,
+    manifest,
+    config,
+    blackout_start_s=None,
+    blackout_duration_s=None,
+    out_dir=None,
+    save_plots=True,
+    return_trajectory=False,
+):
     # Project-specific Phase 1/2 dependencies are imported lazily so that
     # configuration/metric helpers and unit tests can run from this Phase 3
     # package alone. The full project repository still supplies these modules
@@ -325,11 +334,24 @@ def run_session(session_id, manifest, config):
         base_gyro_mag = np.nan
         print("ZUPT: DISABLED (Phase 1 static calibration invalid/unavailable).")
 
+    # Precompute blackout start relative to t_p[0] for causal pre-blackout calibration.
+    b_start_val = (
+        float(config["blackout_start_s"])
+        if blackout_start_s is None
+        else float(blackout_start_s)
+    )
+
     # Build Phone-to-Vehicle frame alignment matrix from actual calibration.
     imu_raw_slice = df_p[
         [p_map["accel_x"], p_map["accel_y"], p_map["accel_z"]]
     ].iloc[:50].to_numpy(dtype=float)
-    R_veh, r_diag = build_alignment_matrix(calib_res.gravity_vector, imu_raw_slice)
+    R_veh, r_diag = build_alignment_matrix(
+        calib_res.gravity_vector,
+        imu_raw_slice,
+        df_phone=df_p,
+        phone_mapping=p_map,
+        blackout_start_s=b_start_val,
+    )
 
     raw_accel = df_p[
         [p_map["accel_x"], p_map["accel_y"], p_map["accel_z"]]
@@ -542,6 +564,7 @@ def run_session(session_id, manifest, config):
     phone_speed_mps = parse_phone_gnss_speed(df_p, p_map["gps_speed"])
     ukf_initialized = False
     init_timestamp = None
+    t_last_gnss = float(t_p[0])
 
     # Store the initial state so trajectory length matches filter epochs.
     # Before initialisation the position is NaN (no valid estimate yet).
@@ -584,8 +607,18 @@ def run_session(session_id, manifest, config):
     gnss_state_counts = {s.value: 0 for s in GnssState}
     baseline_Q = ukf.Q.copy()
 
-    b_start = float(t_p[0]) + float(config["blackout_start_s"])
-    b_end = b_start + float(config["blackout_duration_s"])
+    b_start_val = (
+        float(config["blackout_start_s"])
+        if blackout_start_s is None
+        else float(blackout_start_s)
+    )
+    b_dur_val = (
+        float(config["blackout_duration_s"])
+        if blackout_duration_s is None
+        else float(blackout_duration_s)
+    )
+    b_start = float(t_p[0]) + b_start_val
+    b_end = b_start + b_dur_val
 
     # 6. FILTER LOOP.
     for k in range(1, len(t_p)):
@@ -602,7 +635,7 @@ def run_session(session_id, manifest, config):
         # Use the most recent consecutive distinct-fix pair whose displacement
         # spans >= 50 m.  This avoids the unstable Fix0 position that can
         # inflate the displacement speed by ~2x (ratio 1.83 vs expected ~1.0).
-        in_blackout_k = b_start <= t_p[k] < b_end
+        in_blackout_k = (b_dur_val > 0.0) and (b_start <= t_p[k] < b_end)
         if (not ukf_initialized) and (not in_blackout_k):
             dk_so_far = np.flatnonzero(gnss_distinct[: k + 1])
             n_dk = len(dk_so_far)
@@ -645,6 +678,7 @@ def run_session(session_id, manifest, config):
                         ins_state = ukf.x.copy()
                         ukf_initialized = True
                         init_timestamp = float(t_p[kb] - t_p[0])
+                        t_last_gnss = float(t_p[kb])
                         print(
                             f"  Delayed init at t={init_timestamp:.3f}s "
                             f"(row {kb}): course={course_deg:.1f} deg, "
@@ -663,14 +697,34 @@ def run_session(session_id, manifest, config):
         ins_state = propagate_ins_state(ins_state, u_k, dt)
         raw_ins_pos.append(ins_state[0:2].copy())
 
+        # Time-scaled process noise:
+        # Scale position and velocity process noise with elapsed time since last accepted GNSS
+        # to realistically represent consumer smartphone IMU drift across multi-second GNSS gaps.
+        cfg_tsq = cfg_ukf.get("time_scaled_q", {})
+        tsq_enabled = bool(cfg_tsq.get("enabled", True))
+        if tsq_enabled and ukf_initialized:
+            tau = max(0.0, float(t_p[k] - t_last_gnss))
+            nominal_dt = float(cfg_tsq.get("nominal_dt_s", 0.1))
+            dt_scale = dt / nominal_dt if nominal_dt > 0.0 else 1.0
+            pos_coeff = float(cfg_tsq.get("pos_tau_coeff", 15.0))
+            vel_coeff = float(cfg_tsq.get("vel_tau_coeff", 0.2))
+
+            Q_step = baseline_Q.copy()
+            Q_step[0:3, 0:3] += np.eye(3) * (pos_coeff * (tau ** 2) * dt)
+            Q_step[3:6, 3:6] += np.eye(3) * (vel_coeff * tau * dt)
+            Q_step *= dt_scale
+        else:
+            Q_step = baseline_Q.copy()
+
         # Phase 6: apply adaptive Q scaling for the prediction step.
         _qs = gnss_deficit.q_scale
         if _qs != 1.0:
-            ukf.Q = baseline_Q * _qs
+            Q_step *= _qs
             counters["adaptive_q_predictions"] += 1
+
+        ukf.Q = Q_step
         ukf.predict(propagate_ins_state, dt, u_k)
-        if _qs != 1.0:
-            ukf.Q = baseline_Q.copy()
+        ukf.Q = baseline_Q.copy()
 
         # GNSS update outside simulated blackout, applied ONLY to genuinely new
         # (distinct) fixes. Repeated 10 Hz rows carrying the same coordinates are
@@ -707,6 +761,7 @@ def run_session(session_id, manifest, config):
                 nis_vals.append(float(nis))
             if success and accepted:
                 counters["gnss_accept"] += 1
+                t_last_gnss = float(t_p[k])
                 if is_recovery_probe:
                     counters["recovery_fixes_accepted"] += 1
             elif np.isfinite(nis):
@@ -785,9 +840,51 @@ def run_session(session_id, manifest, config):
     error_values = np.asarray(error_values, dtype=float)
     blackout_flags = np.asarray(blackout_flags, dtype=bool)
 
-    mae_all, rmse_all, max_all = calculate_metrics(errors_all)
-    mae_b, rmse_b, max_b = calculate_metrics(errors_blackout)
     valid_reference_samples = int(len(errors_all))
+    if valid_reference_samples > 0:
+        mae_all, rmse_all, max_all = calculate_metrics(errors_all)
+    else:
+        mae_all, rmse_all, max_all = None, None, None
+
+    if len(errors_blackout) > 0:
+        mae_b, rmse_b, max_b = calculate_metrics(errors_blackout)
+        blackout_end_error_m = float(errors_blackout[-1])
+    else:
+        mae_b, rmse_b, max_b = None, None, None
+        blackout_end_error_m = None
+
+    # Reference distance travelled during blackout
+    blackout_distance_m = 0.0
+    if len(errors_blackout) > 1:
+        b_indices = np.flatnonzero(blackout_flags)
+        ref_b = ref_enu_p[b_indices]
+        valid_ref_b = np.isfinite(ref_b[:, 0]) & np.isfinite(ref_b[:, 1])
+        if np.sum(valid_ref_b) > 1:
+            diffs = np.diff(ref_b[valid_ref_b], axis=0)
+            blackout_distance_m = float(np.sum(np.hypot(diffs[:, 0], diffs[:, 1])))
+
+    # Drift percentage: error_at_end / distance_travelled * 100%
+    drift_pct = None
+    if blackout_end_error_m is not None and blackout_distance_m is not None and blackout_distance_m >= 5.0:
+        drift_pct = float((blackout_end_error_m / blackout_distance_m) * 100.0)
+
+    # Initialization time
+    init_time_s = float(init_timestamp) if ukf_initialized else None
+
+    # Recovery time: time from blackout end until error drops below threshold
+    recovery_time_s = None
+    if b_dur_val > 0.0 and len(errors_blackout) > 0:
+        post_mask = (error_time >= (b_end - t_p[0])) & np.isfinite(error_values)
+        if np.any(post_mask):
+            post_times = error_time[post_mask]
+            post_errs = error_values[post_mask]
+            rec_thresh = max(10.0, 3.0 * sigma_gnss) if sigma_gnss is not None else 10.0
+            rec_idx = np.flatnonzero(post_errs <= rec_thresh)
+            if len(rec_idx) > 0:
+                recovery_time_s = float(post_times[rec_idx[0]] - (b_end - t_p[0]))
+
+    nan_output_count = int(np.sum(np.isnan(results_pos[:, 0])))
+    condition_name = "full_gnss" if b_dur_val == 0.0 else f"blackout_{int(b_dur_val)}s"
 
     print("\n================ EVALUATION SUMMARY ================")
     print(f"Session: {session_id} | Epochs: {len(t_p)}")
@@ -848,23 +945,38 @@ def run_session(session_id, manifest, config):
         print(f"GNSS NIS: median={np.median(nis_all):.1f} | p95={np.percentile(nis_all, 95):.1f} | "
               f"max={np.max(nis_all):.1f} | n={len(nis_all)} (95% gate dof=2: 5.99)")
     print("\n--- Overall Metrics ---")
-    print(f"MAE  : {mae_all:.2f} m")
-    print(f"RMSE : {rmse_all:.2f} m")
+    if mae_all is not None:
+        print(f"MAE  : {mae_all:.2f} m")
+        print(f"RMSE : {rmse_all:.2f} m")
+    else:
+        print("MAE / RMSE : UNAVAILABLE (no valid reference data)")
     print("\n--- Blackout Metrics ---")
-    print(f"MAE  : {mae_b:.2f} m")
-    print(f"RMSE : {rmse_b:.2f} m")
-    print(f"MAX  : {max_b:.2f} m")
+    if mae_b is not None:
+        print(f"MAE  : {mae_b:.2f} m")
+        print(f"RMSE : {rmse_b:.2f} m")
+        print(f"MAX  : {max_b:.2f} m")
+        if drift_pct is not None:
+            print(f"Drift: {drift_pct:.2f}% (end err: {blackout_end_error_m:.2f} m, dist: {blackout_distance_m:.1f} m)")
+    else:
+        print("MAE / RMSE / MAX : N/A (no blackout or no blackout reference samples)")
     print("====================================================")
 
-    out_dir = PROJECT_ROOT / "reports" / "phase3"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir_path = resolve_repo_path(out_dir) if out_dir is not None else (PROJECT_ROOT / "reports" / "phase3")
+    out_dir_path.mkdir(parents=True, exist_ok=True)
 
     metrics = {
         "session_id": session_id,
+        "condition": condition_name,
         "epochs": len(t_p),
-        "blackout_start_s": float(config["blackout_start_s"]),
-        "blackout_end_s": float(config["blackout_start_s"] + config["blackout_duration_s"]),
-        "blackout_duration_s": float(config["blackout_duration_s"]),
+        "blackout_start_s": b_start_val,
+        "blackout_end_s": b_start_val + b_dur_val,
+        "blackout_duration_s": b_dur_val,
+        "blackout_end_error_m": blackout_end_error_m,
+        "blackout_distance_m": blackout_distance_m,
+        "drift_pct": drift_pct,
+        "init_time_s": init_time_s,
+        "recovery_time_s": recovery_time_s,
+        "nan_output_count": nan_output_count,
         "valid_reference_samples": valid_reference_samples,
         "bad_timestamp_count": counters["bad_timestamp"],
         "zupt_enabled": bool(zupt_enabled),
@@ -923,48 +1035,75 @@ def run_session(session_id, manifest, config):
         "recovery_fixes_rejected": counters["recovery_fixes_rejected"],
         "no_fix_timeout_events": counters["no_fix_timeout_events"],
         "no_fix_timeout_s": gnss_deficit._no_fix_timeout_s,
+        "mounting_yaw_deg": float(r_diag.get("mounting_yaw_deg", 0.0)),
+        "yaw_source": str(r_diag.get("yaw_source", "GPS_ORIENTATION" if r_diag.get("yaw_correction_confident") else "identity_fallback")),
+        "calibration_confidence": bool(r_diag.get("yaw_correction_confident", False)),
+        "calibration_samples": int(r_diag.get("yaw_details", {}).get("n_samples", 0)),
+        "calibration_start_s": float(r_diag.get("yaw_details", {}).get("samples", [{}])[0].get("t_s", 0.0)) if r_diag.get("yaw_details", {}).get("samples") else 0.0,
+        "calibration_end_s": float(r_diag.get("yaw_details", {}).get("samples", [{}])[-1].get("t_s", 0.0)) if r_diag.get("yaw_details", {}).get("samples") else 0.0,
+        "circular_spread_deg": float(r_diag.get("yaw_details", {}).get("circ_spread_deg", 0.0)),
+        "resultant_length": float(r_diag.get("yaw_details", {}).get("R_resultant", 0.0)),
     }
-    pd.DataFrame([metrics]).to_csv(out_dir / f"{session_id}_metrics.csv", index=False)
-    with (out_dir / f"{session_id}_metrics.json").open("w", encoding="utf-8") as f:
+    # Filename prefix differentiates condition if out_dir is custom or condition is not default 30s
+    fn_prefix = f"{session_id}_{condition_name}" if (out_dir is not None or b_dur_val != 30.0) else session_id
+    pd.DataFrame([metrics]).to_csv(out_dir_path / f"{fn_prefix}_metrics.csv", index=False)
+    with (out_dir_path / f"{fn_prefix}_metrics.json").open("w", encoding="utf-8") as f:
         json.dump(metrics, f, indent=2)
 
-    # Trajectory plot.
-    valid_mask = np.isfinite(ref_enu_p[:, 0]) & np.isfinite(ref_enu_p[:, 1])
-    plt.figure(figsize=(10, 8))
-    plt.plot(ref_enu_p[valid_mask, 0], ref_enu_p[valid_mask, 1], "k--", label="Ground Truth")
-    if raw_ins_pos.shape[0] == len(t_p):
-        plt.plot(raw_ins_pos[:, 0], raw_ins_pos[:, 1], "r-", alpha=0.7, label="Raw INS")
-    if gnss_plot_pos:
-        gp = np.asarray(gnss_plot_pos)
-        plt.plot(gp[:, 0], gp[:, 1], "g.", markersize=2, alpha=0.6, label="GNSS")
-    plt.plot(results_pos[:, 0], results_pos[:, 1], "b-", label="UKF + NHC/ZUPT")
-    plt.title(f"2D ENU Trajectory - {session_id}")
-    plt.xlabel("East (m)")
-    plt.ylabel("North (m)")
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(out_dir / f"{session_id}_trajectory.png", dpi=150)
-    plt.close()
+    if save_plots:
+        valid_mask = np.isfinite(ref_enu_p[:, 0]) & np.isfinite(ref_enu_p[:, 1])
+        plt.figure(figsize=(10, 8))
+        if np.any(valid_mask):
+            plt.plot(ref_enu_p[valid_mask, 0], ref_enu_p[valid_mask, 1], "k--", label="Ground Truth")
+        if raw_ins_pos.shape[0] == len(t_p):
+            plt.plot(raw_ins_pos[:, 0], raw_ins_pos[:, 1], "r-", alpha=0.7, label="Raw INS")
+        if gnss_plot_pos:
+            gp = np.asarray(gnss_plot_pos)
+            plt.plot(gp[:, 0], gp[:, 1], "g.", markersize=2, alpha=0.6, label="GNSS")
+        plt.plot(results_pos[:, 0], results_pos[:, 1], "b-", label="UKF + NHC/ZUPT")
+        plt.title(f"2D ENU Trajectory - {session_id} ({condition_name})")
+        plt.xlabel("East (m)")
+        plt.ylabel("North (m)")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(out_dir_path / f"{fn_prefix}_trajectory.png", dpi=150)
+        plt.close()
 
-    # Error-vs-time plot with blackout highlighted.
-    plt.figure(figsize=(11, 5))
-    if error_values.size:
-        plt.plot(error_time, error_values, label="Horizontal Position Error")
-    plt.axvspan(
-        float(config["blackout_start_s"]),
-        float(config["blackout_start_s"] + config["blackout_duration_s"]),
-        alpha=0.2,
-        label="GNSS Blackout",
-    )
-    plt.xlabel("Time since session start (s)")
-    plt.ylabel("Horizontal Position Error (m)")
-    plt.title(f"Position Error vs Time - {session_id}")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_dir / f"{session_id}_error_vs_time.png", dpi=150)
-    plt.close()
+        # Error-vs-time plot with blackout highlighted.
+        plt.figure(figsize=(11, 5))
+        if error_values.size:
+            plt.plot(error_time, error_values, label="Horizontal Position Error")
+        if b_dur_val > 0.0:
+            plt.axvspan(
+                b_start_val,
+                b_start_val + b_dur_val,
+                alpha=0.2,
+                color="red",
+                label="GNSS Blackout",
+            )
+        plt.xlabel("Time since session start (s)")
+        plt.ylabel("Horizontal Position Error (m)")
+        plt.title(f"Position Error vs Time - {session_id} ({condition_name})")
+        plt.grid(True)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(out_dir_path / f"{fn_prefix}_error_vs_time.png", dpi=150)
+        plt.close()
+
+    if return_trajectory:
+        trajectory_data = {
+            "results_pos": results_pos,
+            "raw_ins_pos": raw_ins_pos,
+            "ref_enu_p": ref_enu_p,
+            "gnss_plot_pos": gnss_plot_pos,
+            "error_time": error_time,
+            "error_values": error_values,
+            "blackout_flags": blackout_flags,
+            "t_p": t_p,
+            "ltp": ltp,
+        }
+        return metrics, trajectory_data
 
     return metrics
 

@@ -11,6 +11,11 @@ ukf:
     euler: 0.01
     accel_bias: 0.001
     gyro_bias: 0.0001
+  time_scaled_q:
+    enabled: true
+    pos_tau_coeff: 15.0
+    vel_tau_coeff: 0.2
+    nominal_dt_s: 0.1
   R_std:
     gnss_floor: 3.0
     nhc: [0.5, 0.2]
